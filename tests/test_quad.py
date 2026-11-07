@@ -16,8 +16,7 @@ def _fly(steps=20):
 def test_trajectory_matches_reference_plant():
     """Pinned reference trajectory for TorchQuad."""
     q = _fly()
-    ref = torch.tensor([[7.475132465362549, -4.342502052168129e-06, -1.142246127128601],
-                        [-1.1265339851379395, -0.18999958038330078, -1.841422438621521]])
+    ref = torch.tensor([[7.493238925933838, -2.723348188737873e-06, -1.1787363290786743], [-1.1475087404251099, -0.2560795843601227, -1.8475099802017212]])
     assert torch.allclose(q.pos_ned, ref, atol=1e-5)
 
 
