@@ -1,0 +1,33 @@
+{
+  "display_name": "DroneHacks 2026 course (v3)",
+  "renderer_types": [
+    "mesh_depth"
+  ],
+  "mesh": "course.npz",
+  "frame": "NED; origin = floor centre, x = north, y = east, z = down",
+  "env_bounds": {
+    "min": [
+      -3.049299955368042,
+      -3.049299955368042,
+      -3.049299955368042
+    ],
+    "max": [
+      3.049299955368042,
+      3.049299955368042,
+      0.0
+    ]
+  },
+  "landmarks": {
+    "launch_mark_ned": [
+      0.9144,
+      -2.5146,
+      0.0
+    ],
+    "landing_pad_ned": [
+      -0.7925,
+      -2.0422,
+      0.0
+    ],
+    "wall_top_m": 1.727
+  }
+}

@@ -1,0 +1,18 @@
+{
+ "gates": [
+  "corridor_end",
+  "gate_a",
+  "tunnel_exit",
+  "gate_b",
+  "window"
+ ],
+ "gate_geodesic_m": [
+  13.47,
+  9.236,
+  5.793,
+  2.752,
+  2.36
+ ],
+ "cruise_altitude_m": 0.8,
+ "min_clearance_m": 0.23
+}

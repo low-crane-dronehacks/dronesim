@@ -1,0 +1,27 @@
+[project]
+name = "dronehacks-sim"
+version = "0.1.0"
+description = "Fast GPU simulator + RL training for the DroneHacks 2026 course"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "warp-lang>=1.5",
+    "rsl-rl-lib==5.4.1",
+    "tensordict>=0.6",
+    "numpy>=1.26",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+video = ["matplotlib>=3.8", "pillow>=10"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["dronehacks"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
