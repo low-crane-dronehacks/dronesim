@@ -20,13 +20,16 @@ from typing import Optional
 import torch
 
 GRAVITY = 9.81
-MASS = 1.5                                   # kg
-I_DIAG = (0.012, 0.012, 0.020)               # kg m^2
-ARM = 0.13                                   # rotor offset along each body axis, m
-ROTOR_POSITIONS_B = ((+ARM, -ARM, 0.0), (-ARM, -ARM, 0.0), (-ARM, +ARM, 0.0), (+ARM, +ARM, 0.0))
+MASS = 1.348                                 # kg
+I_DIAG = (0.006401, 0.006743, 0.010085)               # kg m^2
+FRONT_DEADCAT_Y = 0.1596 # rotor offset along y axis, m
+FRONT_DEADCAT_X = 0.0921 # rotor offset along x axis, m
+REAR_DEADCAT_X = 0.1384
+REAR_DEADCAT_Y = 0.1351
+ROTOR_POSITIONS_B = ((+FRONT_DEADCAT_X, -FRONT_DEADCAT_Y, 0.0), (-REAR_DEADCAT_X, -REAR_DEADCAT_Y, 0.0), (-REAR_DEADCAT_X, +REAR_DEADCAT_Y, 0.0), (+FRONT_DEADCAT_X, +FRONT_DEADCAT_Y, 0.0))
 ROTOR_DIRECTIONS = (-1, 1, -1, 1)
-TORQUE_TO_THRUST_RATIO = 0.07
-THRUST_RANGE = (0.1, 10.0)                   # N per rotor (2.7:1 thrust-to-weight)
+TORQUE_TO_THRUST_RATIO = 0.0116         
+THRUST_RANGE = (0.15, 12.6)                   # N per rotor, assuming 4s nomial
 MOTOR_TAU_RANGE = (0.025, 0.035)             # s
 C_DRAG = 0.25                                # linear drag, 1/s:  F = -C_DRAG * m * v
 C_ANG = 0.05                                 # angular drag, 1/s: tau = -C_ANG * I * w
@@ -296,8 +299,8 @@ class TorchQuad:
         alloc[5] = torch.tensor(ROTOR_DIRECTIONS, **kw) * TORQUE_TO_THRUST_RATIO
         self._alloc = alloc
         self._alloc_pinv = torch.linalg.pinv(alloc)
-        self._hover = self.mass * GRAVITY / 4
-        self.applied_thrust = torch.full((e, 4), self._hover, **kw)
+        self._hover = self._alloc_pinv[:, 2] * (self.mass * GRAVITY)   # (4,) exact deadcat hover thrust
+        self.applied_thrust = self._hover.unsqueeze(0).repeat(e, 1)
         self.motor_tau = torch.empty(e, 1, **kw).uniform_(*MOTOR_TAU_RANGE)
         self._inertia = torch.tensor(I_DIAG, **kw)
         self._g = torch.tensor([0.0, 0.0, -GRAVITY], **kw)
@@ -306,6 +309,7 @@ class TorchQuad:
         self.controller = LeeVelocityController(e, self.device, self.mass)
         self.v_max = torch.tensor(v_max, **kw)
         self._yaw_gain = float(yaw_rate_max) / YAW_RATE_SCALE
+        
         #: set to a list to collect (E,3) NED position after every 100 Hz substep (sub-step collision checks)
         self.substep_pos = None
         #: set to a list to record (E,6) [pos_ned, rpy_ned] after every substep (videos)
