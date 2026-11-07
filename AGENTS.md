@@ -27,8 +27,9 @@ setpoints). This repo is our own fast training sim; it is not that one. See "Dep
   otherwise tunnels through a wall), compute the reward, reset the finished envs, return observations.
 - `quad.py`: the action is a velocity command `[fwd, right, down, yaw_rate]` in [-1, 1], scaled by `v_max`
   (default 5, 3, 2 m/s) in the **yaw-aligned body frame**. It goes through a Lee geometric velocity
-  controller, rotor allocation, first-order motor lag (tau 25-35 ms) and drag. Controller
-  gains and motor tau are re-drawn every episode. Internally the state is a Z-up world (x east, y north)
+  controller, deadcat rotor allocation, 4S LiPo sag + PX4-style filtered voltage compensation, first-order
+  motor lag (tau 25-35 ms, scaled by voltage) and drag. Controller gains, motor tau, battery SoC and internal
+  resistance are re-drawn every episode. Internally the state is a Z-up world (x east, y north)
   with XYZW quaternions; everything outside `quad.py` is **NED** (x north, y east, z down; altitude = -z).
 - `render.py`: Warp BVH over the exact course triangles. Depth is z-depth / 5 m from a 72 x 50 deg camera at
   128 x 80. Collision = distance to wall/tunnel/boulder < 0.20 m. The rangefinder casts 5 rays over 27 deg.

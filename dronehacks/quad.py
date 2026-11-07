@@ -20,14 +20,25 @@ from typing import Optional
 import torch
 
 GRAVITY = 9.81
-MASS = 1.5                                   # kg
-I_DIAG = (0.012, 0.012, 0.020)               # kg m^2
-ARM = 0.13                                   # rotor offset along each body axis, m
-ROTOR_POSITIONS_B = ((+ARM, -ARM, 0.0), (-ARM, -ARM, 0.0), (-ARM, +ARM, 0.0), (+ARM, +ARM, 0.0))
+MASS = 1.348                                 # kg
+I_DIAG = (0.006401, 0.006743, 0.010085)               # kg m^2
+FRONT_DEADCAT_Y = 0.1596 # rotor offset along y axis, m
+FRONT_DEADCAT_X = 0.0921 # rotor offset along x axis, m
+REAR_DEADCAT_X = 0.1384
+REAR_DEADCAT_Y = 0.1351
+ROTOR_POSITIONS_B = ((+FRONT_DEADCAT_X, -FRONT_DEADCAT_Y, 0.0), (-REAR_DEADCAT_X, -REAR_DEADCAT_Y, 0.0), (-REAR_DEADCAT_X, +REAR_DEADCAT_Y, 0.0), (+FRONT_DEADCAT_X, +FRONT_DEADCAT_Y, 0.0))
 ROTOR_DIRECTIONS = (-1, 1, -1, 1)
-TORQUE_TO_THRUST_RATIO = 0.07
-THRUST_RANGE = (0.1, 10.0)                   # N per rotor (2.7:1 thrust-to-weight)
-MOTOR_TAU_RANGE = (0.025, 0.035)             # s
+TORQUE_TO_THRUST_RATIO = 0.0116
+THRUST_RANGE = (0.15, 12.6)                  # N per rotor at BATT_NOM_V (4S nominal, DYS X2807 + Gemfan 7035-2)
+MOTOR_TAU_RANGE = (0.025, 0.035)             # s at BATT_NOM_V
+# 4S LiPo + PX4 voltage compensation model (BAT1_R_INTERNAL + MC_BAT_SCALE_EN / HoverThrustEstimate)
+BATT_NOM_V = 14.8                            # 4S nominal reference voltage (V)
+BATT_CAP_AH = 2.2                            # 4S pack capacity (Ah)
+BATT_R_INT_RANGE = (0.018, 0.035)            # 4S pack + XT60/lead internal resistance (Ohm), drawn per episode
+BATT_SOC_INIT_RANGE = (0.35, 1.0)            # initial State of Charge in [0, 1], drawn per episode
+BATT_COMP_TAU = 0.8                          # PX4 filtered voltage / hover-thrust estimator lag (s)
+BATT_IDLE_I = 5.5                            # Jetson + Pixhawk + OAK-D (1.5 A) + 4x motor no-load (4.0 A)
+BATT_THRUST_I_COEFF = 1.05                   # A / N^1.5 per rotor (DYS X2807 1700KV + Gemfan 7035-2 on 4S)
 C_DRAG = 0.25                                # linear drag, 1/s:  F = -C_DRAG * m * v
 C_ANG = 0.05                                 # angular drag, 1/s: tau = -C_ANG * I * w
 YAW_RATE_SCALE = math.radians(45.0)          # internal yaw command unit (see TorchQuad._yaw_gain)
@@ -296,9 +307,15 @@ class TorchQuad:
         alloc[5] = torch.tensor(ROTOR_DIRECTIONS, **kw) * TORQUE_TO_THRUST_RATIO
         self._alloc = alloc
         self._alloc_pinv = torch.linalg.pinv(alloc)
-        self._hover = self.mass * GRAVITY / 4
-        self.applied_thrust = torch.full((e, 4), self._hover, **kw)
+        self._hover = self._alloc_pinv[:, 2] * (self.mass * GRAVITY)   # (4,) exact deadcat hover thrust
+        self.applied_thrust = self._hover.unsqueeze(0).repeat(e, 1)
         self.motor_tau = torch.empty(e, 1, **kw).uniform_(*MOTOR_TAU_RANGE)
+        self.batt_soc = torch.empty(e, 1, **kw).uniform_(*BATT_SOC_INIT_RANGE)
+        self.batt_r_int = torch.empty(e, 1, **kw).uniform_(*BATT_R_INT_RANGE)
+        self._hover_i = BATT_IDLE_I + BATT_THRUST_I_COEFF * self._hover.clamp_min(0.0).pow(1.5).sum()
+        v_oc = 14.0 + 2.2 * self.batt_soc + 0.6 * self.batt_soc.pow(3)
+        self.batt_v_term = (v_oc - self._hover_i * self.batt_r_int).clamp_min(11.0)
+        self.batt_v_est = self.batt_v_term.clone()
         self._inertia = torch.tensor(I_DIAG, **kw)
         self._g = torch.tensor([0.0, 0.0, -GRAVITY], **kw)
         self._P = torch.tensor(_P, **kw)
@@ -306,6 +323,7 @@ class TorchQuad:
         self.controller = LeeVelocityController(e, self.device, self.mass)
         self.v_max = torch.tensor(v_max, **kw)
         self._yaw_gain = float(yaw_rate_max) / YAW_RATE_SCALE
+        
         #: set to a list to collect (E,3) NED position after every 100 Hz substep (sub-step collision checks)
         self.substep_pos = None
         #: set to a list to record (E,6) [pos_ned, rpy_ned] after every substep (videos)
@@ -328,7 +346,14 @@ class TorchQuad:
         self.lin_vel_w[env_ids] = 0.0 if vel_ned is None else ned_to_world(vel_ned)
         self.ang_vel_b[env_ids] = 0.0
         self.applied_thrust[env_ids] = self._hover
-        self.motor_tau[env_ids] = torch.empty(len(env_ids), 1, device=self.device).uniform_(*MOTOR_TAU_RANGE)
+        n = len(env_ids)
+        self.motor_tau[env_ids] = torch.empty(n, 1, device=self.device).uniform_(*MOTOR_TAU_RANGE)
+        self.batt_soc[env_ids] = torch.empty(n, 1, device=self.device).uniform_(*BATT_SOC_INIT_RANGE)
+        self.batt_r_int[env_ids] = torch.empty(n, 1, device=self.device).uniform_(*BATT_R_INT_RANGE)
+        v_oc = 14.0 + 2.2 * self.batt_soc[env_ids] + 0.6 * self.batt_soc[env_ids].pow(3)
+        v_hover = (v_oc - self._hover_i * self.batt_r_int[env_ids]).clamp_min(11.0)
+        self.batt_v_term[env_ids] = v_hover
+        self.batt_v_est[env_ids] = v_hover
         self.controller.reset_idx(env_ids)
 
     @property
@@ -362,8 +387,23 @@ class TorchQuad:
     def _physics_step(self, cmd: torch.Tensor) -> None:
         dt = self.dt
         wrench = self.controller.compute(cmd, self.quat_w, self.ang_vel_b, self.lin_vel_w)
-        thrust_cmd = torch.clamp(torch.clamp(wrench @ self._alloc_pinv.transpose(-2, -1), min=0.0), *THRUST_RANGE)
-        alpha = 1.0 - torch.exp(-dt / self.motor_tau)
+
+        # 4S LiPo current draw, terminal voltage sag (V_oc - I * R_int), and PX4 voltage-compensation filter
+        i_batt = BATT_IDLE_I + BATT_THRUST_I_COEFF * self.applied_thrust.clamp_min(0.0).pow(1.5).sum(dim=-1, keepdim=True)
+        v_oc = 14.0 + 2.2 * self.batt_soc + 0.6 * self.batt_soc.pow(3)
+        v_term = (v_oc - i_batt * self.batt_r_int).clamp_min(11.0)
+        self.batt_v_term = v_term
+        self.batt_soc = (self.batt_soc - i_batt * (dt / (3600.0 * BATT_CAP_AH))).clamp_min(0.0)
+        self.batt_v_est += (v_term - self.batt_v_est) * (1.0 - math.exp(-dt / BATT_COMP_TAU))
+
+        # PX4 scales thrust commands by filtered batt_v_est, so fast I*R_int sag causes (v_term / batt_v_est)^2 drop,
+        # while 100% duty-cycle motor saturation is always hard-clamped by true terminal voltage (v_term / BATT_NOM_V)^2.
+        sag_gain = (v_term / self.batt_v_est).square()
+        max_thrust = THRUST_RANGE[1] * (v_term / BATT_NOM_V).square()
+        raw_cmd = (wrench @ self._alloc_pinv.transpose(-2, -1)).clamp_min(0.0) * sag_gain
+        thrust_cmd = torch.minimum(raw_cmd.clamp_min(THRUST_RANGE[0]), max_thrust)
+        tau_eff = self.motor_tau * (BATT_NOM_V / v_term)
+        alpha = 1.0 - torch.exp(-dt / tau_eff)
         self.applied_thrust += (thrust_cmd - self.applied_thrust) * alpha
         w_b = self.applied_thrust @ self._alloc.transpose(-2, -1)
         drag_f_w = -C_DRAG * self.mass * self.lin_vel_w
