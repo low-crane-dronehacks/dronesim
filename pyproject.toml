@@ -1,5 +1,5 @@
 [project]
-name = "dronehacks-sim"
+name = "dronesim"
 version = "0.1.0"
 description = "Fast GPU simulator + RL training for the DroneHacks 2026 course"
 requires-python = ">=3.10"

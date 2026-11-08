@@ -17,8 +17,8 @@ Scoring (`dronehacks/rules.py`, out of 60):
 - return bonus x1.25: after landing, take off by itself, fly back over the barrier and land within 2 ft of
   the launch mark
 
-The organizers also run an official ROS 2 / PX4 simulator (companion container, cuVSLAM VIO, Offboard
-setpoints). This repo is our own fast training sim; it is not that one. See "Deployment" below.
+This repo is our own fast training sim. The approach and the current results are in `docs/APPROACH.md`; the
+onboard ROS 2 / PX4 stack is https://github.com/low-crane-dronehacks/deploy. See "Deployment" below.
 
 ## How the sim works
 
@@ -39,8 +39,9 @@ setpoints). This repo is our own fast training sim; it is not that one. See "Dep
   near the goal, near the route, anywhere in free space, moving and tilted). **SGS** (`sgs.py`) picks starts
   whose recent success is near 50%, so the curriculum follows the policy. Return banks add pad / climb /
   cross / final-approach starts.
-- Reward = competition points / 60, paid when earned. **Keep it sparse and rules-exact** (team decision):
-  no shaping unless it matches what the rules pay. Potential shaping toward the launch mark was tried for
+- Reward = competition points / 60, paid when earned. **Keep it rules-exact** (team decision): the only
+  extra term is the optional potential-based `cp_shaping` (reward per metre of approach to the next
+  checkpoint; potential-based, so it does not change the optimal policy). Potential shaping toward the launch mark was tried for
   the return leg and pulled the drone into the barrier.
 
 ## Conventions
@@ -87,9 +88,9 @@ setpoints). This repo is our own fast training sim; it is not that one. See "Dep
     `torch.tensor(...)` per call, `int()/float()/.any()` on GPU values. `torch.cuda.set_sync_debug_mode('warn')`
     lists them. env.step had 32 per step; it has 4.
 
-## Real-world effects (`realism.py`, eval-realism branch)
+## Real-world effects (`realism.py`)
 
-Opt-in via `CourseEnvCfg.realism` (`--realism` on evaluate, `stress.py` for one effect at a time). Off =
+Opt-in via `CourseEnvCfg.realism` (`--realism` on train and evaluate, `stress.py` for one effect at a time). Off =
 the ideal sim, bit-identical to before. Design rules:
 - every effect uses a private generator, so turning one on never shifts the nominal random stream;
 - each has a cheap form usable in training (`render_scale=1`, `real_lite`) and an accurate eval form
@@ -138,27 +139,12 @@ What each models and what it does not:
   near (or train with them). Occlusion bands and holes still break the policy with either fill.
 - Pipeline check: the 640x400 depth path with every error off scores like ideal (47.0 / 41.6).
 
-### Organizers' simulator capture (2026-11-06, ~/dronehacks-official/capture, read-only, nothing flown)
+### The organizers' simulator is held out
 
-**RULE: the organizers' simulator is a HELD-OUT test (sim2sim generalization), never a training target.** Do not
-fit realism.py, the banks, or any training setting to its numbers below: it is itself only an approximation of
-the real course, and tuning to it would hide sim2real gaps instead of exposing them. Use it only to evaluate.
-Fixes must be justified by the real hardware/rules (e.g. "the drone can be placed at any heading"), not by
-"their sim does X".
-
-- Geometry: their 5 cm collision voxels match our course mesh (99.9% within 6 cm, zero offset). Their start pose
-  is NED (1.114, -2.515), facing NORTH (heading 0), 0.2 m north of the painted launch mark.
-- Our training launch pose faced 134.6 deg (a degenerate route tangent at the vertical takeoff): comp_s2 launched
-  facing north scores 0 (64/64 floor) vs 47.4 at 134.6. Every ground start must vary heading + position.
-- Their stereo depth (SGBM, OAK-D S2 640x400, fx 421, baseline 7.49 cm, 16UC1 mm, ~15 Hz) on the pad, on the
-  128x80 policy grid: 39% valid (ours: 71-77%). Top half 65-69%, floor rows 4-5% (textureless floor gives no
-  return), a fixed ~16-column invalid band on the LEFT edge (the disparity search range, independent of depth),
-  ~1/3 of wall pixels missing, half of all pixels flicker valid/invalid frame to frame. Temporal noise < 1 cm
-  to 3 m, ~11 cm at 3-4 m. (Held out: NOT used to tune our depth model; it is a test of how far a policy trained
-  on our model generalizes.)
-- VIO at rest: < 1 mm position noise, no drift in 12 s (moving behaviour unknown). Sim RTF ~0.88.
-- The bag (pad_bag, mcap, 15 s): both stereo images + their depth + IMU + cuVSLAM odometry + PX4 state; read with
-  ~/venvs/rosbags (rosbags). Extract: capture/pad_extract.npz.
+The organizers' ROS 2 / PX4 simulator is a HELD-OUT test (sim2sim generalization), never a training target. Do
+not fit realism.py, the banks, or any training setting to it: it is itself only an approximation of the real
+course, and tuning to it would hide sim2real gaps instead of exposing them. Fixes must be justified by the real
+hardware and rules (e.g. "the drone can be placed at any heading"), not by "their sim does X".
 
 ## Known gaps vs the real competition
 
@@ -166,13 +152,11 @@ Fixes must be justified by the real hardware/rules (e.g. "the drone can be place
 - "Fastest team" time is a stand-in: remaining geodesic distance / 4 m/s, ratio capped at 1.
 - Return-leg starts assume 50 run points were banked. The policy is not told where the launch mark is,
   only that the return flag is set; it has to remember the way.
-- Training still uses the ideal sim (no depth / state-estimate noise, no latency); realism.py models these
-  for evaluation. No wind, no ground effect, no prop wash near walls.
 - The course is the organizers' preliminary v3 CAD; rebuild `assets/` if they publish changes.
 - Ground contact counts at 0.05 m centre height while a parked drone sits at 0.08 m, so 0.05-0.08 m
   skimming is not penalised once airborne.
 
-## Results so far (points / 60, deterministic eval)
+## Baseline results (points / 60, deterministic eval; current results are in docs/APPROACH.md)
 
 | policy | launch run | near-route | anywhere | notes |
 |---|---|---|---|---|
@@ -181,18 +165,19 @@ Fixes must be justified by the real hardware/rules (e.g. "the drone can be place
 | comp_s2 on perturbed layouts, severity 0.5 / 1 | 41.2 / 29.5 | 28.4 / 26.3 | 23.5 / 22.2 | walls +-15 cm, +-4 deg |
 | pert_s1 (perturb-trained, 2048 envs, ramp) | 4.9 | 25.3 | 22.7 | launch collides 83%; degrades less with severity |
 | return_s1 | 0 | | | 85% home from cross starts, 0% from pad starts (skid bug, now fixed) |
-
 | pert_s2 (perturb-trained, 1024 envs, no ramp) | 41.7 | 31.3 | 26.3 | 100% finish; at severity 1: 30.5 / 28.0 / 24.2 (comp_s2: 29.6 / 26.4 / 22.2) |
 
 Numbers above for comp_s2 / pert_s2 / return_s1 were re-measured with this repo on GPU and match the original
-original training-time evals within noise (the env is bit-identical except the later floor-friction fix).
+training-time evals within noise (the env is bit-identical except the later floor-friction fix).
 
-## Deployment (not started)
+## Deployment
 
-The policy outputs body-frame velocity + yaw-rate setpoints at 10 Hz from depth + rangefinder +
-velocity, which maps onto PX4 Offboard `TrajectorySetpoint` velocity on the official stack. It needs a
-velocity estimate (VIO) and an OAK-D depth stream at 128 x 80, 72 x 50 deg. Expect to add depth and
-velocity noise in sim before trusting it.
+The onboard stack is https://github.com/low-crane-dronehacks/deploy. Export with
+`python -m dronehacks.export_policy <ckpt> --out <name>.npz` (NumPy only, verified against torch). The policy
+outputs yaw-aligned body-frame velocity + yaw-rate setpoints at 10 Hz from depth + rangefinder + velocity +
+attitude; the deploy repo re-projects the OAK depth image into the 128 x 80, 72 x 50 deg training camera and
+sends PX4 Offboard velocity setpoints. Its `docs/POLICIES.md` is the observation/action contract: keep it in
+sync with `env.py`.
 
 ## Updating this file
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""policynav.node: run a trained dronehacks-sim policy on the native ROS 2 / PX4 stack (sim or aircraft).
+"""policynav.node: run a trained dronesim policy on the native ROS 2 / PX4 stack (sim or aircraft).
 
   in   depth          sensor_msgs/Image (16UC1 mm or 32FC1 m) + CameraInfo  (depth_topic, default the OAK depth)
        calibration    TF base_link <- depth frame_id (looked up once)

@@ -85,7 +85,7 @@ def latest_checkpoint(ckpt_dir: str):
 def parse(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--run-id', required=True)
-    ap.add_argument('--runs-dir', default=RUNS, help='parent of the run directory (lab PCs sync only out/ or logs/)')
+    ap.add_argument('--runs-dir', default=RUNS, help='parent of the run directory (default runs/)')
     ap.add_argument('--num-envs', type=int, default=2048, help='2048 needs ~32 GB VRAM; use 1024 on 24 GB')
     ap.add_argument('--total-steps', type=int, default=100_000_000, help='env steps summed over envs')
     ap.add_argument('--device', default='cuda:0')

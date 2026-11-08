@@ -1,6 +1,6 @@
 # Local PX4 SITL rig (evaluation only: tests the policy node on real PX4 software, never a training target)
 
-Phase 1 (target): Docker container on a lab PC with
+Phase 1 (target): Docker container on a desktop with an NVIDIA GPU, with
 - ROS 2 Jazzy + Gazebo Harmonic (start from `osrf/ros:jazzy-desktop-full`, which ships ros_gz/Harmonic)
 - PX4-Autopilot SITL (gz_x500_depth or x500 + a forward depth camera), uXRCE-DDS agent, `px4_msgs` matching the
   PX4 version, all built from their upstream sources

@@ -107,7 +107,7 @@ def main(argv=None) -> None:
     ap.add_argument('--perturb', type=float, default=0.0, help='evaluate on perturbed layouts of this severity')
     ap.add_argument('--perturb-variants', type=int, default=16)
     ap.add_argument('--perturb-seed', type=int, default=777, help='fixed, so every checkpoint sees the same layouts')
-    ap.add_argument('--plant', default=None, help='airframe profile json (e.g. assets/plant_kit.json; measured drone)')
+    ap.add_argument('--plant', default=None, help='airframe profile json (e.g. assets/plant_nominal.json, the template for a measured drone)')
     ap.add_argument('--realism', default='', help="real-world effects: 'real' (all) or e.g. 'depth,velocity' "
                                                    '(presets in realism.py; stress.py runs them one by one)')
     ap.add_argument('--out', default=None, help='json path (default: next to the checkpoint)')

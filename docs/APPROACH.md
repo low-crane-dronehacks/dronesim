@@ -1,5 +1,8 @@
 # Approach
 
+Training code: this repo ([README](../README.md)). Onboard code that flies the exported policies:
+[low-crane-dronehacks/deploy](https://github.com/low-crane-dronehacks/deploy).
+
 ## Summary
 
 - **Simulator.** GPU-parallel (thousands of envs) PyTorch simulator. Depth images are ray traced against the
@@ -71,9 +74,12 @@ Configured in `dronehacks/realism.py` (sensor and plant effects), `dronehacks/pe
 ## Evaluation protocol
 
 Deterministic policy (mean action), 512 launches per condition, fixed layout seeds, the deployed drone's camera
-band (left-edge invalid band) and the deploy-side edge fill applied. Success % / mean points (out of 60):
+band (left-edge invalid band) and the deploy-side edge fill applied. Success % / mean points (out of 60).
+`c5_s164` is `policies/c5_s164_1575.npz`, the drone default on deploy `main`; `s196` is
+`policies/holes_v5h3_s196_3255.npz`, the default on the deploy branch `policy/holes-v5h3-s196`
+([low-crane-dronehacks/deploy](https://github.com/low-crane-dronehacks/deploy)).
 
-| condition | deployed c5_s164 | s196 (current default) | s274 (hole-robust) |
+| condition | c5_s164 (deployed) | s196 (proposed default) | s274 (hole-robust) |
 |---|---|---|---|
 | as-built course, 4% stereo holes | 93.6 / 37.8 | 91.4 / 37.8 | 88.7 / 37.1 |
 | 20% stereo holes | - | 86.3 / 36.7 | 88.7 / - |

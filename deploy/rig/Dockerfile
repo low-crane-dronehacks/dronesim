@@ -5,11 +5,11 @@ ARG JOBS=8
 ARG PX4_TAG=v1.17.0
 ARG MSGS_BRANCH=release/1.17
 ARG XRCE_TAG=v3.0.1
-# Upstream git URLs of PX4-Autopilot, Micro-XRCE-DDS-Agent and px4_msgs: pass via --build-arg (run_rig.sh forwards
-# PX4_REPO / XRCE_REPO / MSGS_REPO from the environment).
-ARG PX4_REPO
-ARG XRCE_REPO
-ARG MSGS_REPO
+# Upstream git URLs of PX4-Autopilot, Micro-XRCE-DDS-Agent and px4_msgs. Override with --build-arg to use a mirror
+# (run_rig.sh forwards PX4_REPO / XRCE_REPO / MSGS_REPO from the environment when they are set).
+ARG PX4_REPO=https://github.com/PX4/PX4-Autopilot.git
+ARG XRCE_REPO=https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+ARG MSGS_REPO=https://github.com/PX4/px4_msgs.git
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git cmake ninja-build build-essential ccache python3-pip python3-venv python3-dev xsltproc libxml2-utils \

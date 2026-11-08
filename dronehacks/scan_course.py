@@ -1,6 +1,6 @@
 """Build an eval course from a real scan of the course (Scaniverse/LiDAR point cloud .ply, z up, metres).
 
-    python -m dronehacks.scan_course ~/dronehacks-course-scan-2026-11-06.ply --out assets/course_scan.npz
+    python -m dronehacks.scan_course course_scan.ply --out assets/course_scan.npz
 
 1. register: 2-D wall cross-sections (0.3-1.5 m) of the scan against the CAD course: exhaustive rotation (+ mirror)
    x FFT-correlation translation, then ICP. Prints the residual and writes a top-view overlay PNG.
