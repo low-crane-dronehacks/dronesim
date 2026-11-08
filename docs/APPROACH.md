@@ -82,3 +82,20 @@ band (left-edge invalid band) and the deploy-side edge fill applied. Success % /
 | perturbed layouts (v5h3) | - | 79.5 / 34.2 | 77.0 / 32.4 |
 | perturbed layouts (published map) | - | 81.4 / 38.3 | 76.0 / 36.3 |
 | wall 0 + window at scanned position | 12.7 / 28.0 | 53.7 / 32.6 | 19.5 / 28.6 |
+
+### Unseen courses
+
+Policies trained from scratch on the pack of 62 procedurally generated courses (100M steps, ideal depth,
+5 m/s cap; the same reward and SGS settings as above), evaluated on 5 generated courses never seen in training.
+Same protocol: success % / mean points, 512 launches each:
+
+| policy | 62 training courses | 5 unseen courses |
+|---|---|---|
+| gen_fast seed 306 | 46.1 / 27.2 | 49.0 / 30.7 |
+| gen_fast seed 307 | 54.1 / 28.8 | 41.0 / 24.9 |
+| mean | 50.1 / 28.0 | 45.0 / 27.8 |
+
+Performance on unseen courses matches performance on the training courses, so the policy learned course-general
+navigation rather than memorising layouts. Training these generalist policies with the full sensor and plant
+randomization above is in progress.
+
