@@ -11,6 +11,36 @@
   course from depth alone.
 - **Reward/score.** Episodes are scored by the competition rules (points out of 60).
 
+## Why the method generalizes to new environments
+
+**The reward comes from the task definition, not from tuning.** The reward is the competition score itself
+(points / 60, paid when earned): checkpoints crossed in order, the pad landing, the speed bonus and the window
+bonus (`dronehacks/env.py`, `dronehacks/rules.py`). A new course needs only what defines the task anyway: the
+mesh, the checkpoint lines, the pad and the launch pose. There are no hand-weighted penalty or shaping terms to
+re-balance per course. The one dense term (`cp_shaping`) is potential-based, so it does not change which
+policy is optimal: reward per metre of approach to the next checkpoint. Its coefficient is the same for every
+environment we train on: the published map, the scan-registered as-built course, perturbed layouts, and a pack
+of 62 procedurally generated courses (`dronehacks/coursegen.py`).
+
+**SGS replaces a hand-designed curriculum.** Training episodes start from a reset bank: a large set of start
+states that `dronehacks/bank.py` samples automatically from the course geometry. They cover the launch pose,
+points along the planned route, points near the goal, and anywhere in free space. Each start state is its own
+cell with a running history of outcomes (last 100 episodes). Success Guided Sampling (SGS; Zhang et al.,
+arXiv:2610.12465) draws starts in proportion to a Beta-shaped weight of each cell's success rate, peaked at
+the target 0.5 (`dronehacks/sgs.py`). So:
+- The curriculum is emergent. Early on, only starts near the goal succeed sometimes, so sampling concentrates
+  there. As the policy improves, the 50%-success frontier moves back along the course toward the launch. The
+  sparse, task-defined reward becomes learnable without staging or reward shaping.
+- It adapts to whatever is hard in a given course (a tight gap, the tunnel, the landing) without anyone
+  identifying it. Cells that are always solved or never solved are sampled rarely.
+- A fixed share of resets (`--launch-frac`, 0.3 in our runs) still starts at the launch pose, so the full run
+  from launch is always being practised.
+- Nothing is course-specific. The bank is generated from geometry, and the SGS hyperparameters (target 0.5,
+  concentration 1, history 100, temperature 2) are fixed across every experiment and every course.
+
+**Robustness is built in, not bolted on.** The sensor and plant randomization below is a property of the
+simulator, not of the course. It applies unchanged to any environment the course loader or generator produces.
+
 ## Robustness / domain randomization
 
 Configured in `dronehacks/realism.py` (sensor and plant effects), `dronehacks/perturb.py` (course layout) and
