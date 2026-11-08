@@ -71,6 +71,8 @@ Configured in `dronehacks/realism.py` (sensor and plant effects), `dronehacks/pe
   policy's inputs mean the same thing throughout training.
 - **Start state.** Idle on the floor at the launch mark (the policy must take off itself).
 
+Exact training commands for every policy below: [recipes/](../recipes/README.md).
+
 ## Evaluation protocol
 
 Deterministic policy (mean action), 512 launches per condition, fixed layout seeds, the deployed drone's camera

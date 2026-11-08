@@ -68,7 +68,15 @@ python -m dronehacks.export_policy <ckpt> --out my_policy.npz
 
 # procedurally generated courses: top-down review sheet
 python -m dronehacks.coursegen gallery --n 20 --out out/coursegen
+
+# course packs: build a set of generated courses, train on it, evaluate on held-out courses
+python -m dronehacks.coursepack build --seeds 0-63 --out assets/packs/gen64.npz
+python -m dronehacks.train --run-id gen_s1 --course-pack packs/gen64.npz --launch-frac 0.3 --cp-shaping 0.02
+python -m dronehacks.evaluate runs/gen_s1/checkpoints/<ckpt>.pt --course-pack packs/heldout5.npz
 ```
+
+**Exact recipes** for every policy in docs/APPROACH.md (including the fine-tune lineage and its starting
+checkpoints) are in [recipes/](recipes/README.md).
 
 Runs go to `runs/<run-id>/` (`metrics.jsonl`, `checkpoints/`, `config.json`). Re-running a run id resumes it.
 Judge policies with `dronehacks.evaluate`, never the training curve.
@@ -83,9 +91,10 @@ policies in docs/APPROACH.md do not use it.
 
 ## Baseline checkpoints in this repo
 
-The `.pt` files in `checkpoints/` are the **first-generation baselines** (ideal sim, published map), kept as
+`comp_s2.pt`, `pert_s2.pt` and `return_s1.pt` in `checkpoints/` are the **first-generation baselines** (ideal sim, published map), kept as
 small reproducible examples. They are not the current policies; those are described in docs/APPROACH.md and
 shipped as `.npz` in the deploy repo. Each `.pt` is an rsl_rl state dict; its `.json` holds the training config.
+`asb_s115.pt`, `c5_s164.pt` and `s196.pt` are the starting checkpoints of the fine-tune recipes in `recipes/`.
 
 Points out of 60, `python -m dronehacks.evaluate`: mean of seeds 1000 and 2000, 512 launch episodes,
 2048 starts per other condition.

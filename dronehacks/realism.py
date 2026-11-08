@@ -254,9 +254,11 @@ def _box(lo, hi):
     return v, f
 
 
-def net_frame(rng: np.random.Generator, cfg: RealismCfg, net_half: float = 3.05):
+def net_frame(rng: np.random.Generator, cfg: RealismCfg, net_half=3.05):
     """Posts every ``post_spacing_m`` along each side (always at the corners) and three rails (floor, centre,
-    top at ``frame_h_m``): square bars of side ``bar_d`` centred on the net plane. -> boxes."""
+    top at ``frame_h_m``): square bars of side ``bar_d`` centred on the net plane. -> boxes. ``net_half``: a scalar
+    (square net) or (north, east) half sizes (a course-pack course)."""
+    nh = np.broadcast_to(np.asarray(net_half, np.float64), (2,))
     def tt():
         d = rng.uniform(*cfg.bar_d_range) if cfg.bar_d_range[1] > 0 else cfg.bar_d
         return d / 2
@@ -266,9 +268,9 @@ def net_frame(rng: np.random.Generator, cfg: RealismCfg, net_half: float = 3.05)
     boxes = []
     for axis in (0, 1):
         for sgn in (-1, 1):
-            c = sgn * net_half
-            n = max(1, int(round(2 * net_half / rng.uniform(*cfg.post_spacing_m))))
-            ss = np.linspace(-net_half, net_half, n + 1)
+            c = sgn * nh[axis]
+            n = max(1, int(round(2 * nh[1 - axis] / rng.uniform(*cfg.post_spacing_m))))
+            ss = np.linspace(-nh[1 - axis], nh[1 - axis], n + 1)
             ss[1:-1] += rng.uniform(-0.05, 0.05, n - 1)                       # posts are not perfectly even
             for s in ss:
                 if rng.uniform() < cfg.bar_drop_frac:
@@ -284,17 +286,19 @@ def net_frame(rng: np.random.Generator, cfg: RealismCfg, net_half: float = 3.05)
                 t = tt(); o = rng.uniform(-cfg.bar_offset_m, cfg.bar_offset_m)
                 lo, hi = [0.0, 0.0, -z - t], [0.0, 0.0, -z + t]
                 lo[axis], hi[axis] = c + o - t, c + o + t
-                lo[1 - axis], hi[1 - axis] = -net_half, net_half
+                lo[1 - axis], hi[1 - axis] = -nh[1 - axis], nh[1 - axis]
                 boxes.append((tuple(lo), tuple(hi)))
     return boxes
 
 
-def room_clutter(rng: np.random.Generator, cfg: RealismCfg, net_half: float = 3.05) -> CourseMesh:
-    """A random room around the net (NED, z down): floor beyond the net, four walls, people/tables/chairs."""
+def room_clutter(rng: np.random.Generator, cfg: RealismCfg, net_half=3.05) -> CourseMesh:
+    """A random room around the net (NED, z down): floor beyond the net, four walls, people/tables/chairs.
+    ``net_half``: a scalar (square net) or (north, east) half sizes."""
+    nh = np.broadcast_to(np.asarray(net_half, np.float64), (2,))
     boxes = [((-9.0, -9.0, 0.0), (9.0, 9.0, 0.02))]                         # floor outside the net (slightly low)
     for axis in (0, 1):
         for sgn in (-1, 1):
-            d = net_half + rng.uniform(*cfg.room_gap_m)
+            d = nh[axis] + rng.uniform(*cfg.room_gap_m)
             lo, hi = [-9.0, -9.0, -4.0], [9.0, 9.0, 0.0]
             lo[axis], hi[axis] = (d, d + 0.2) if sgn > 0 else (-d - 0.2, -d)
             boxes.append((tuple(lo), tuple(hi)))
@@ -304,7 +308,7 @@ def room_clutter(rng: np.random.Generator, cfg: RealismCfg, net_half: float = 3.
         kind = rng.choice(['person', 'table', 'chair', 'cart'])
         w, dpt, h = {'person': (0.45, 0.30, rng.uniform(1.55, 1.9)), 'table': (rng.uniform(0.8, 1.8), 0.75, 0.75),
                      'chair': (0.5, 0.5, rng.uniform(0.45, 0.95)), 'cart': (0.6, 0.9, 1.0)}[kind]
-        r = net_half + 0.15 + rng.uniform(0.0, cfg.room_gap_m[0] + 1.0)
+        r = float(nh.max()) + 0.15 + rng.uniform(0.0, cfg.room_gap_m[0] + 1.0)
         th = rng.uniform(0, 2 * np.pi)
         c = np.array([r * np.cos(th), r * np.sin(th)])
         c = np.clip(c, -8.0, 8.0)

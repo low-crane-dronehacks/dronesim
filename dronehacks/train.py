@@ -125,6 +125,8 @@ def parse(argv=None) -> argparse.Namespace:
     ap.add_argument('--perturb-variants', type=int, default=32)
     ap.add_argument('--perturb-mode', choices=('fixed', 'spread'), default='spread')
     ap.add_argument('--perturb-ramp-steps', type=int, default=0)
+    ap.add_argument('--course-pack', default='', help='train on a course pack (coursepack.py, e.g. '
+                                                       'assets/packs/gen10.npz) instead of the real course')
     ap.add_argument('--uniform', action='store_true', help='uniform bank sampling instead of SGS')
     ap.add_argument('--realism', default='', help="real-world effects during training, e.g. 'real_lite' (realism.py)")
     ap.add_argument('--realism-ramp-steps', type=int, default=30_000_000,
@@ -164,7 +166,7 @@ def main(argv=None) -> None:
         bank_file=a.bank or ('bank_return_v3.npz' if mode in ('joint', 'return') else 'bank_free_v3.npz'),
         return_mode=mode, max_episode_s=a.max_episode_s or (90.0 if mode == 'joint' else 45.0),
         perturb=a.perturb, perturb_variants=a.perturb_variants, perturb_mode=a.perturb_mode,
-        perturb_ramp_steps=a.perturb_ramp_steps, sgs_uniform=a.uniform, launch_frac=a.launch_frac, launch_liftoff_frac=a.launch_liftoff_frac, skip_terminal=a.skip_terminal, course_mods=a.course_mods, course_file=a.course_file, **({'window_gate': tuple(a.window_gate)} if a.window_gate else {}), perturb_scale=a.perturb_scale, cp0_wall=a.cp0_wall, anchor_wall=a.anchor_wall, gate_extend=a.gate_extend, critic_depth=a.critic_depth, v_max_anneal_steps=a.v_max_anneal_steps, **({'v_max_start': tuple(a.v_max_start)} if a.v_max_start else {}), critic_full=a.critic_full, obs_pool=a.obs_pool, **({'cp_margin': a.cp_margin} if a.cp_margin is not None else {}), launch_yaw_max_deg=a.launch_yaw_max, start_heading_max_deg=a.start_heading_max, cp_shaping=a.cp_shaping, **({'arena_half': a.arena_half} if a.arena_half else {}), extra_boulders=tuple(a.extra_boulders), invalid_mask=a.invalid_mask,
+        perturb_ramp_steps=a.perturb_ramp_steps, sgs_uniform=a.uniform, course_pack=a.course_pack, launch_frac=a.launch_frac, launch_liftoff_frac=a.launch_liftoff_frac, skip_terminal=a.skip_terminal, course_mods=a.course_mods, course_file=a.course_file, **({'window_gate': tuple(a.window_gate)} if a.window_gate else {}), perturb_scale=a.perturb_scale, cp0_wall=a.cp0_wall, anchor_wall=a.anchor_wall, gate_extend=a.gate_extend, critic_depth=a.critic_depth, v_max_anneal_steps=a.v_max_anneal_steps, **({'v_max_start': tuple(a.v_max_start)} if a.v_max_start else {}), critic_full=a.critic_full, obs_pool=a.obs_pool, **({'cp_margin': a.cp_margin} if a.cp_margin is not None else {}), launch_yaw_max_deg=a.launch_yaw_max, start_heading_max_deg=a.start_heading_max, cp_shaping=a.cp_shaping, **({'arena_half': a.arena_half} if a.arena_half else {}), extra_boulders=tuple(a.extra_boulders), invalid_mask=a.invalid_mask,
         pos_obs=a.pos_obs,
         realism=parse_realism(a.realism, seed=a.seed, ramp_steps=a.realism_ramp_steps) if a.realism else None,
         metrics_path=os.path.join(run_dir, 'metrics.jsonl') if rank == 0 else None)
@@ -179,7 +181,8 @@ def main(argv=None) -> None:
                       indent=1, default=str)
 
     env = CourseEnv(cfg)
-    print(f'[train] {a.run_id}: {a.num_envs} envs, bank {cfg.bank_file} ({len(env._bank_pos)} starts), '
+    src = f'pack {cfg.course_pack} (seeds {env.pack_seeds})' if cfg.course_pack else f'bank {cfg.bank_file}'
+    print(f'[train] {a.run_id}: {a.num_envs} envs, {src} ({len(env._bank_pos)} starts), '
           f'{tcfg["max_iterations"]} iterations', flush=True)
     runner = OnPolicyRunner(env, tcfg, log_dir=ckpt_dir if rank == 0 else None, device=a.device)
     resume = latest_checkpoint(ckpt_dir)

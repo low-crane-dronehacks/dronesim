@@ -172,7 +172,8 @@ def build_free_bank(route: Route, clearance: Clearance, n: int, seed: int, *, gr
                     route_yaw_noise_deg: float = 35.0, moving_frac: float = 0.5,
                     vel_range=(2.0, 2.0, 1.0), look_s=(0.2, 0.4, 0.6), tilted_frac: float = 0.5,
                     tilt_sigma_deg: float = 6.0, tilt_max_deg: float = 15.0,
-                    alt_range=(0.2, 1.5), heading_mix=(0.5, 0.3, 0.2), heading_sigma_deg=(45.0, 120.0)) -> Bank:
+                    alt_range=(0.2, 1.5), heading_mix=(0.5, 0.3, 0.2), heading_sigma_deg=(45.0, 120.0),
+                    xy_half=2.95) -> Bank:
     """N starts spread over the whole free volume connected to the goal, in four categories:
 
     * ``launch``     ``launch_frac``: the exact launch pose (the competition start);
@@ -186,7 +187,8 @@ def build_free_bank(route: Route, clearance: Clearance, n: int, seed: int, *, gr
     start is kept only if it still clears ``min_clearance`` after each ``look_s`` seconds of
     constant-velocity flight, so it is not doomed before the policy can act.
     Every start clears ``min_clearance`` (exact) and lies in the goal's connected free component, so
-    it is solvable by construction. ``geo`` stores the geodesic distance to the goal.
+    it is solvable by construction. ``geo`` stores the geodesic distance to the goal. ``xy_half`` (scalar or
+    (north, east)) bounds the look-ahead horizontally: inside the net (2.95 m on the real course).
 
     HEADINGS of the non-launch, non-route starts are a mixture (``heading_mix``): the geodesic descent
     direction (the way the shortest path to the goal leaves that voxel) +- N(0, 45 deg), the same +-
@@ -268,7 +270,7 @@ def build_free_bank(route: Route, clearance: Clearance, n: int, seed: int, *, gr
         for t in look_s:                       # constant-velocity look-ahead: still clear, still in the volume
             ahead = cand_pos + cand_vel * t
             good &= clearance(ahead) >= min_clearance
-            good &= (ahead[:, 2] <= -0.15) & (ahead[:, 2] >= -1.55) & (np.abs(ahead[:, :2]) <= 2.95).all(1)
+            good &= (ahead[:, 2] <= -0.15) & (ahead[:, 2] >= -1.55) & (np.abs(ahead[:, :2]) <= np.asarray(xy_half, float)).all(1)
         # near-route positions must also be in the goal's component (a route offset can leave it)
         ij = np.clip(np.rint((cand_pos - grid.lo) / res).astype(int), 0, np.asarray(grid.shape) - 1)
         good &= np.isfinite(geo_grid[ij[:, 0], ij[:, 1], ij[:, 2]])

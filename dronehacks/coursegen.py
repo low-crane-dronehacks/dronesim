@@ -1,23 +1,26 @@
-"""Procedural DroneHacks-like courses: one clear route, open spaces, emergent around-paths and windows, no ceilings.
+"""Procedural DroneHacks courses: one clear route, no dead ends, no ceilings, elements of the real course in any
+order and geometry.
 
     from dronehacks.coursegen import CourseGenCfg, generate
-    c = generate(seed=0)            # -> GenCourse: mesh, gates, pad, launch pose, route
-    python -m dronehacks.coursegen gallery --n 20 --out out/coursegen       # top-down review sheet
-    python -m dronehacks.coursegen orbit --real --seeds 1 2 3                # 3-D orbit MP4s
+    c = generate(seed=0)            # -> GenCourse: mesh, gates, pad, launch pose, planned path
+    python -m dronehacks.coursegen gallery --real --n 19 --out out/coursegen    # top-down review sheet
+    python -m dronehacks.coursegen orbit --real --seeds 1 2 3                   # 3-D orbit MP4s with the path
 
-Route first: a straight-biased self-avoiding walk on a grid of corridor-width cells (1.05-1.4 m) from a border
-start cell to an open landing area (2x2..3x3 cells, boulders, the pad). Walls go ONLY where they bound the route:
-every edge between a route cell and anything that is not the next/previous route cell. Cells off the route are
-plain open floor (no maze filler, no dead ends, nothing roofed except the optional round tube). Then:
-  open spaces   some route cells are widened into an unused neighbour (a bay beside the corridor)
-  around paths  a wall between two legs of the route (where it doubles back) may end short of the corner, so the
-                route visibly wraps around a free-standing wall end, like the real course
-  windows       an opening in a wall between two far-apart legs: a shortcut that clears cp 3 (+5) as on the real one
-  tunnel        the round tube (the real course's only roofed element) on a straight run
-  objects       boulders pushed to one side of a corridor, low hurdles (fly over), angled panels at turns
-Gates: 4 lines across the corridor at 1/5..4/5 of the route (cp 0..3) + the pad (cp 4), as in rules.py. The whole
-course is rotated by a random angle; the net alone bounds the arena on 60% of courses. Start: the first route cell
-facing the next one (training banks add +-30 deg). NED frame, floor z = 0, walls 1.727 m.
+Skeleton (the real course's): a divider splits the arena into a serpentine half (K = 2..4 spurs alternating
+from the divider and the net, bays 0.95-1.35 m) and an open room split by a diagonal wall; a connector at the
+divider's far end. What varies:
+  order     forward (start in the first bay, land in the room: the real course) or reversed (start in the
+            room, land in a wide first bay)
+  tube      over the connector, along a long serpentine corridor (the serpentine is deepened to fit it), or none
+  window    a shortcut through the diagonal (real), through any spur wall (so possibly the first thing met), a
+            wall across a corridor that can only be passed through its window, or none
+  objects   4-14 floor objects of varied shape and size (rocks, crates, cones, benches) anywhere off the walls,
+            placed only where they leave a passage
+  geometry  arena 5.6-6.6 m a side, bay widths, gaps, diagonal lean, deflector, short spur; mirror + 90 deg turns
+Every wall is anchored to the net or another wall and every gap is on the route, so there is one way through.
+Gates 0-3 are 4 of the route's openings in order; a shortcut window is gate 4, clearing the cp of the opening it
+bypasses (+5, as on the real course). ``plan_course`` gives the launch -> gates -> pad path (and the window
+variant) through 3-D free space; a course is kept only if it exists. NED, floor z = 0, walls 1.727 m.
 """
 from __future__ import annotations
 
@@ -30,55 +33,55 @@ import numpy as np
 from dronehacks.mesh import GROUP_ID, CourseMesh
 
 WALL_H = 1.727
+PAD_R = 39 * 0.0254
+CRUISE_ALT = 0.8
 
 
 @dataclass
 class CourseGenCfg:
-    cells: Tuple[int, int] = (4, 6)            # grid side length range (cells per side)
-    cell_m: Tuple[float, float] = (1.05, 1.4)  # cell size range: corridor width (real first corridor: 1.12 m)
-    wall_t: float = 0.06                        # wall thickness (plywood + framing)
+    arena_m: Tuple[float, float] = (5.6, 6.6)       # net square side (real: 6.10), each axis drawn separately
+    serp_depth: Tuple[float, float] = (2.3, 3.0)    # depth of the serpentine half (real: 2.60)
+    serp_depth_tube: Tuple[float, float] = (3.2, 3.8)   # when the tube goes in a serpentine corridor
+    spurs: Tuple[int, int] = (2, 4)                  # real: 3
+    bay_w: Tuple[float, float] = (0.95, 1.35)        # serpentine bay width (real: 1.05-1.20)
+    landing_bay_w: Tuple[float, float] = (2.15, 2.5) # first bay when the order is reversed (holds the pad)
+    spur_gap: Tuple[float, float] = (0.85, 1.15)     # gap at a spur's free end (real: 0.95-1.00)
+    last_bay_w: Tuple[float, float] = (1.9, 2.8)     # last bay, holding the connector at its far side (real: 2.75)
+    connector_w: Tuple[float, float] = (1.25, 1.6)   # real: 1.45
+    p_reverse: float = 0.4                           # start in the room, land in the first bay
+    tube_where: Tuple[float, float, float] = (0.35, 0.4, 0.25)   # P(connector, corridor, none)
+    tunnel_len: Tuple[float, float] = (1.2, 1.8)     # real: 1.50
+    diag_gap: Tuple[float, float] = (0.85, 1.15)     # diagonal top -> divider (real: 0.95)
+    diag_lean: Tuple[float, float] = (-1.1, 0.4)     # bottom end's sideways offset (- = toward the pad; real: -0.8)
+    window_where: Tuple[float, float, float, float] = (0.25, 0.35, 0.3, 0.1)   # P(diagonal, spur, across, none)
+    window_w: Tuple[float, float] = (0.8, 0.95)      # real: 0.91
+    window_z: Tuple[float, float] = (0.55, 0.9)      # sill height
+    window_h: Tuple[float, float] = (0.65, 0.8)
+    p_deflector: float = 0.6
+    p_short_spur: float = 0.5
+    n_objects: Tuple[int, int] = (4, 14)
+    wall_t: float = 0.06
     wall_h: float = WALL_H
     net_h: float = 3.0
-    margin_m: float = 0.15                      # gap between the outermost cells and the net
-    route_frac: Tuple[float, float] = (0.45, 0.75)   # share of the grid the route covers
-    p_straight: float = 0.65                    # route keeps its direction with this probability (long clear runs)
-    p_border_walls: float = 0.4                 # else the net alone bounds route cells on the border
-    p_widen: float = 0.25                       # per route cell: open its wall to an unused neighbour (open space)
-    p_divider_gap: float = 0.5                  # a wall between two legs of the route is shortened at its free end
-    p_window: float = 0.7                       # a window in a wall between two far-apart legs (a shortcut)
-    window_wh: Tuple[float, float] = (0.7, 0.6)
-    window_z: Tuple[float, float] = (0.7, 1.1)
-    p_tunnel: float = 0.5                       # the round tube (the real course's only roofed element)
-    tube_r: Tuple[float, float] = (0.65, 0.8)
-    n_boulders: Tuple[int, int] = (0, 3)        # in corridors, pushed to one side
-    boulder_r: Tuple[float, float] = (0.10, 0.22)
-    boulder_h: Tuple[float, float] = (0.3, 1.2)
-    p_hurdle: float = 0.3                       # low bar across the corridor (fly over); no overhead parts
-    hurdle_h: Tuple[float, float] = (0.35, 0.7)
-    min_passage: float = 0.75
-    pad_r: float = 39 * 0.0254
-    room_shapes: Tuple[Tuple[int, int], ...] = ((2, 2), (2, 3), (3, 3))   # open landing area (cells)
-    room_boulders: Tuple[int, int] = (0, 4)
-    n_chamfer: Tuple[int, int] = (0, 3)         # angled panels at route turns
-    rotate: bool = True
-    launch_yaw_tol_deg: float = 30.0            # the drone is placed pointing the way to go, within this much
+    min_clear_m: float = 0.3                         # planned path clearance a course must allow
+    launch_yaw_tol_deg: float = 30.0
 
 
 @dataclass
 class GenCourse:
     mesh: CourseMesh
-    gates: List[Dict]                # rules.GATES format; index 4 = window (cp 3) or a dummy far away
+    gates: List[Dict]                # rules.GATES format; index 4 = shortcut window or a dummy far away
     pad_center: np.ndarray           # (2,) NED
     pad_r: float
     launch: np.ndarray               # (3,) NED (on the floor: z = -0.08)
-    launch_yaw: float                # NED heading toward the next route cell (nominal; banks add +-launch_yaw_tol)
-    route: np.ndarray                # (R,3) NED polyline through the route cell centres at cruise height
+    launch_yaw: float                # NED heading along the planned path (banks add +-launch_yaw_tol)
+    route: np.ndarray                # (R,3) NED planned path launch -> gates -> pad
     goal: np.ndarray                 # (3,) NED: above the pad centre
+    route_window: Optional[np.ndarray] = None   # the same through the shortcut window
     info: Dict = field(default_factory=dict)
 
 
 # ── geometry helpers ─────────────────────────────────────────────────────────────────────────────────────
-
 class _MeshBuilder:
     def __init__(self):
         self.v, self.f, self.g, self.o = [], [], [], []
@@ -109,6 +112,20 @@ class _MeshBuilder:
         a = np.linspace(0, 2 * np.pi, sides, endpoint=False)
         ring = np.stack([cx + r * np.cos(a), cy + r * np.sin(a)], 1)
         v = np.concatenate([np.c_[ring, np.full(sides, z0)], np.c_[ring, np.full(sides, z1)]]).astype(np.float32)
+        f = []
+        for i in range(sides):
+            j = (i + 1) % sides
+            f += [[i, j, sides + j], [i, sides + j, sides + i]]
+        for i in range(1, sides - 1):
+            f += [[0, i + 1, i], [sides, sides + i, sides + i + 1]]
+        self._add(v, np.array(f, np.int32), group)
+
+    def frustum(self, cx, cy, r0, r1, h, group, sides=8, rot=0.0):
+        """A cone / tapered rock standing on the floor: radius r0 at the floor, r1 at height h."""
+        a = np.linspace(0, 2 * np.pi, sides, endpoint=False) + rot
+        lo = np.stack([cx + r0 * np.cos(a), cy + r0 * np.sin(a), np.zeros(sides)], 1)
+        hi = np.stack([cx + r1 * np.cos(a), cy + r1 * np.sin(a), np.full(sides, -h)], 1)
+        v = np.concatenate([hi, lo]).astype(np.float32)
         f = []
         for i in range(sides):
             j = (i + 1) % sides
@@ -181,320 +198,473 @@ def _wall_segment(mb, p0, p1, cfg, gap=None):
     seg(gc - gw / 2, gc + gw / 2, gz + gh, cfg.wall_h)
 
 
-# ── route-first layout ───────────────────────────────────────────────────────────────────────────────────
 
-_DIRS = ((1, 0), (0, 1), (-1, 0), (0, -1))
-
-
-def _route_walk(nx, ny, start, target_len, p_straight, rng, tries=400):
-    """Self-avoiding walk from ``start`` that prefers going straight: a long, clear route of >= target_len cells."""
-    best = None
-    for _ in range(tries):
-        path, seen = [start], {start}
-        d = _DIRS[rng.integers(4)]
-        while True:
-            c = path[-1]
-            opts = [dd for dd in _DIRS if (c[0] + dd[0], c[1] + dd[1]) not in seen
-                    and 0 <= c[0] + dd[0] < nx and 0 <= c[1] + dd[1] < ny]
-            if not opts:
-                break
-            if d in opts and rng.random() < p_straight:
-                nd = d
-            else:
-                turns = [dd for dd in opts if dd != d] or opts
-                nd = turns[rng.integers(len(turns))]
-            d = nd
-            n = (c[0] + d[0], c[1] + d[1])
-            path.append(n)
-            seen.add(n)
-        if best is None or len(path) > len(best):
-            best = path
-        if len(best) >= target_len:
-            return best[:max(target_len, int(len(best) * rng.uniform(0.8, 1.0)))]
-    return best
+def _windowed_panel(mb, a, b, cfg, frac, w, z0, h):
+    """Wall panel a -> b with a w x h opening centred at ``frac`` along it, sill at z0 (UP metres)."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    L = np.linalg.norm(b - a)
+    d = (b - a) / L
+    c0, c1 = frac * L - w / 2, frac * L + w / 2
+    mb.panel(a, a + d * c0, cfg.wall_t, -cfg.wall_h, 0.0, 'wall')
+    mb.panel(a + d * c1, b, cfg.wall_t, -cfg.wall_h, 0.0, 'wall')
+    mb.panel(a + d * c0, a + d * c1, cfg.wall_t, -z0, 0.0, 'wall')
+    mb.panel(a + d * c0, a + d * c1, cfg.wall_t, -cfg.wall_h, -(z0 + h), 'wall')
+    return a + d * frac * L, d
 
 
-def generate(seed: int, cfg: Optional[CourseGenCfg] = None, max_tries: int = 80) -> GenCourse:
+def _gate(name, cp, A, B, n, z=None):
+    A, B, n = np.asarray(A, float), np.asarray(B, float), np.asarray(n, float)
+    g = {'name': name, 'cp': cp, 'A': A, 'B': B, 't': (B - A) / np.linalg.norm(B - A),
+         'L': float(np.linalg.norm(B - A)), 'n': n / np.linalg.norm(n)}
+    if z is not None:
+        g['z'] = float(z)
+    return g
+
+
+def _seg_dist(p, a, b):
+    p, a, b = (np.asarray(v, float) for v in (p, a, b))
+    t = np.clip(np.dot(p - a, b - a) / np.dot(b - a, b - a), 0, 1)
+    return float(np.linalg.norm(p - (a + t * (b - a))))
+
+
+def _concat(meshes) -> CourseMesh:
+    vs, fs, gs, os_, n = [], [], [], [], 0
+    for m in meshes:
+        vs.append(m.vertices)
+        fs.append(m.faces + n)
+        gs.append(m.face_group)
+        os_.append(m.face_object)
+        n += len(m.vertices)
+    return CourseMesh(np.concatenate(vs).astype(np.float32), np.concatenate(fs).astype(np.int32),
+                      np.concatenate(gs), np.concatenate(os_))
+
+
+def generate(seed: int, cfg: Optional[CourseGenCfg] = None, max_tries: int = 60, plan: bool = True) -> GenCourse:
     cfg = cfg or CourseGenCfg()
     rng = np.random.default_rng(seed)
     for _ in range(max_tries):
-        c = _try(rng, cfg)
+        lay = _layout(rng, cfg)
+        if lay is None:
+            continue
+        c = _finish(lay, rng, cfg, plan)
         if c is not None:
             c.info['seed'] = seed
             return c
     raise RuntimeError(f'no valid course for seed {seed}')
 
 
-def _try(rng, cfg: CourseGenCfg) -> Optional[GenCourse]:
-    nx, ny = (int(v) for v in rng.integers(cfg.cells[0], cfg.cells[1] + 1, size=2))
-    cs = rng.uniform(*cfg.cell_m)
-    W, H = nx * cs, ny * cs
-    org = np.array([-W / 2, -H / 2])
-    centre = lambda c: org + (np.asarray(c, float) + 0.5) * cs   # noqa: E731
-    inside = lambda c: 0 <= c[0] < nx and 0 <= c[1] < ny          # noqa: E731
-    border = [(i, j) for i in range(nx) for j in range(ny) if i in (0, nx - 1) or j in (0, ny - 1)]
-    start = border[rng.integers(len(border))]
-    route = _route_walk(nx, ny, start, int(rng.uniform(*cfg.route_frac) * nx * ny), cfg.p_straight, rng)
-    if route is None or len(route) < 11:
+def _layout(rng, cfg: CourseGenCfg):
+    """Walls, tube, windows, pad, launch and gate candidates in the local frame (x: serpentine at +x, y: connector
+    at +y). -> dict, or None to draw again."""
+    U = lambda r: float(rng.uniform(*r))             # noqa: E731
+    reverse = rng.random() < cfg.p_reverse
+    tube_where = ('connector', 'corridor', 'none')[rng.choice(3, p=np.array(cfg.tube_where) / sum(cfg.tube_where))]
+    win_where = ('diag', 'spur', 'across', 'none')[rng.choice(4, p=np.array(cfg.window_where) / sum(cfg.window_where))]
+    hx, hy = U(cfg.arena_m) / 2, U(cfg.arena_m) / 2
+    Dn = U(cfg.serp_depth_tube) if tube_where == 'corridor' else U(cfg.serp_depth)
+    if 2 * hx - Dn < 2 * PAD_R + 0.7:                 # the room must hold the pad (forward) or the start (reverse)
         return None
-    # open landing area: an rw x rh block around the route's end, made only of the end cell and unused cells
-    rw, rh = cfg.room_shapes[rng.integers(len(cfg.room_shapes))]
-    if rng.random() < 0.5:
-        rw, rh = rh, rw
-    room = None
-    for k in range(len(route) - 1, 5, -1):
-        cx, cy = route[k]
-        for ox in range(rw):
-            for oy in range(rh):
-                blk = {(cx - ox + i, cy - oy + j) for i in range(rw) for j in range(rh)}
-                if all(inside(c) for c in blk) and not blk & set(route[:k]):
-                    room = blk
-                    break
-            if room:
-                break
-        if room:
-            route = route[:k + 1]
-            break
-    if room is None or len(route) < 10:
+    d = hx - Dn                                       # divider line x = d
+    wl, wc = U(cfg.last_bay_w) - (0.5 if reverse else 0.0), U(cfg.connector_w)
+    w0 = U(cfg.landing_bay_w) if reverse else None
+    span = 2 * hy - wl - (w0 or 0.0)
+    ks = [k for k in range(cfg.spurs[0], cfg.spurs[1] + 1)
+          if cfg.bay_w[0] * (k - (1 if reverse else 0)) <= span <= cfg.bay_w[1] * (k - (1 if reverse else 0))]
+    if not ks or wc > wl - 0.5:
         return None
-    idx = {c: k for k, c in enumerate(route)}
-    on = set(route) | room
-    # corridor topology: consecutive route cells are joined; the room is one open area; widened cells join an unused
-    # neighbour (an open space beside the corridor); everything else between two cells gets a wall
-    joined = {frozenset((route[k], route[k + 1])) for k in range(len(route) - 1)}
-    for a_ in room:
-        for b_ in room:
-            if abs(a_[0] - b_[0]) + abs(a_[1] - b_[1]) == 1:
-                joined.add(frozenset((a_, b_)))
-    open_area = set(room)
-    for c in route[1:-1]:
-        if rng.random() < cfg.p_widen:
-            nb = [(c[0] + d[0], c[1] + d[1]) for d in _DIRS]
-            nb = [n for n in nb if inside(n) and n not in on and n not in open_area]
-            if nb:
-                n = nb[rng.integers(len(nb))]
-                joined.add(frozenset((c, n)))
-                open_area.add(n)
-    region = on | open_area                                  # cells the drone may use (the rest is open floor outside)
+    K = int(rng.choice(ks))
+    nb = K - (1 if reverse else 0)
+    w = list(rng.dirichlet(np.full(nb, 6.0)) * span) if nb else []
+    if w and (min(w) < cfg.bay_w[0] - 0.05 or max(w) > cfg.bay_w[1] + 0.05):
+        return None
+    if reverse:
+        w = [w0] + w
+    w = np.array(w)
+    ys = -hy + np.cumsum(w)                           # spur i at y = ys[i]
+    on_div = [(K - 1 - i) % 2 == 0 for i in range(K)] # the last spur hangs off the divider: no pocket above the connector
+    gaps = [U(cfg.spur_gap) for _ in range(K)]
+    bay_lo = np.r_[-hy, ys[:-1]]                      # bay j spans y in [bay_lo[j], ys[j]]
+    yc = hy - wc
+    walls = [((d, -hy), (d, yc))]                     # divider, net to connector
+    for i in range(K):
+        x0, x1 = (d, hx - gaps[i]) if on_div[i] else (d + gaps[i], hx)
+        walls.append(((x0, ys[i]), (x1, ys[i])))
+
+    # where the route runs straight in bay j (between the turn zones at its two ends), and which way (forward)
+    def bay_run(j):
+        exit_top = on_div[j]                          # leaves bay j over (top) or under (bottom) spur j
+        z_exit = gaps[j]
+        z_entry = 0.9 if j == 0 else gaps[j - 1]      # bay 0: the launch zone (forward) / landing (reverse)
+        lo = d + (z_entry if exit_top else z_exit)
+        hi = hx - (z_exit if exit_top else z_entry)
+        return lo, hi, (1.0 if exit_top else -1.0)
 
     mb = _MeshBuilder()
-    mb.box((-W / 2 - 2, -H / 2 - 2, 0.0), (W / 2 + 2, H / 2 + 2, 0.02), 'floor')
-    border_walls = rng.random() < cfg.p_border_walls
-    # a window: in the wall between two route cells that are far apart along the route (a shortcut, like the real one)
-    window = None
-    if rng.random() < cfg.p_window:
-        cands = [(c, n) for c in route for d in _DIRS for n in [(c[0] + d[0], c[1] + d[1])]
-                 if n in idx and idx[n] - idx[c] >= 4 and frozenset((c, n)) not in joined
-                 and 0.4 * len(route) <= idx[n] <= 0.95 * len(route)]
-        if cands:
-            window = cands[rng.integers(len(cands))]
-    walls = []
-    done = set()
-    for c in region:
-        for d in _DIRS:
-            n = (c[0] + d[0], c[1] + d[1])
-            e = frozenset((c, n))
-            if e in joined or e in done:
-                continue
-            done.add(e)
-            if not inside(n) and not border_walls:
-                continue                                    # the net bounds this side
-            lo = org + np.array(c) * cs
-            p0, p1 = {(1, 0): (lo + [cs, 0], lo + [cs, cs]), (-1, 0): (lo, lo + [0, cs]),
-                      (0, 1): (lo + [0, cs], lo + [cs, cs]), (0, -1): (lo, lo + [cs, 0])}[d]
-            divider = n in idx and c in idx                 # between two legs of the route
-            walls.append((p0, p1, e, divider))
-    for p0, p1, e, divider in walls:
-        gap = None
-        if window is not None and e == frozenset(window):
-            along = abs(p1[0] - p0[0]) > abs(p1[1] - p0[1])
-            gap = ((p0[0] + p1[0]) / 2 if along else (p0[1] + p1[1]) / 2, cfg.window_wh[0],
-                   rng.uniform(*cfg.window_z), cfg.window_wh[1])
-            _wall_segment(mb, p0, p1, cfg, gap)
-        elif divider and rng.random() < cfg.p_divider_gap:
-            # a divider ends short of the corner: the route can be seen and flown around it (an "around" path);
-            # the gate order still rewards following the route
-            q = np.asarray(p1, float) - (np.asarray(p1, float) - np.asarray(p0, float)) * rng.uniform(0.25, 0.45)
-            _wall_segment(mb, p0, q, cfg)
-        else:
-            _wall_segment(mb, p0, p1, cfg)
-    # round tube (only roofed element), on a straight run with a straight approach and exit
-    tunnel, tube_r = [], rng.uniform(*cfg.tube_r)
-    if rng.random() < cfg.p_tunnel:
-        for L in (3, 2, 1):
-            cands = [k0 for k0 in range(2, len(route) - L - 1)
-                     if not set(route[k0 - 1:k0 + L + 1]) & room and not any(
-                         frozenset((route[j], x)) in joined and x not in route
-                         for j in range(k0, k0 + L) for x in [(route[j][0] + d[0], route[j][1] + d[1]) for d in _DIRS])
-                     and (all(c[0] == route[k0 - 1][0] for c in route[k0 - 1:k0 + L + 1])
-                          or all(c[1] == route[k0 - 1][1] for c in route[k0 - 1:k0 + L + 1]))]
-            if cands:
-                k0 = cands[rng.integers(len(cands))]
-                tunnel = route[k0:k0 + L]
-                break
-    if tunnel:
-        a_, b_ = centre(tunnel[0]), centre(tunnel[-1])
-        k = idx[tunnel[0]]
-        d = centre(route[k + 1]) - centre(route[k]) if len(tunnel) == 1 else b_ - a_
-        d = d / np.linalg.norm(d)
-        mb.tube(a_ - d * cs / 2, b_ + d * cs / 2, tube_r, tube_r + 0.15, 'tunnel')
-    objects = []
-    free_cells = [c for c in route[2:] if c not in room and c not in tunnel]
-    rng.shuffle(free_cells)
-    for c in free_cells[:int(rng.integers(cfg.n_boulders[0], cfg.n_boulders[1] + 1))]:
-        r = rng.uniform(*cfg.boulder_r)
-        if cs - cfg.wall_t - 2 * r - cfg.min_passage <= 0.05:
-            continue
-        lo = org + np.array(c) * cs
-        off = np.array([0.0, 0.0])
-        off[rng.integers(2)] = rng.choice([-1, 1]) * (cs / 2 - cfg.wall_t / 2 - r - 0.02)
-        p = lo + cs / 2 + off
-        mb.prism(p[0], p[1], r, -rng.uniform(*cfg.boulder_h), 0.0, 'boulder')
-        objects.append(('boulder', p.tolist(), float(r)))
-    padc = np.array([centre(c) for c in room]).mean(0)
-    pad_r = float(min(cfg.pad_r, cs - 0.15))
-    for _ in range(int(rng.integers(cfg.room_boulders[0], cfg.room_boulders[1] + 1))):
-        cells = sorted(room)
-        c = cells[rng.integers(len(cells))]
-        r = rng.uniform(*cfg.boulder_r)
-        p = org + np.array(c) * cs + rng.uniform(r + 0.05, cs - r - 0.05, 2)
-        if np.linalg.norm(p - padc) < pad_r + r + 0.15 or c == route[-1]:
-            continue
-        mb.prism(p[0], p[1], r, -rng.uniform(*cfg.boulder_h), 0.0, 'boulder')
-        objects.append(('boulder', p.tolist(), float(r)))
-    turns = [k for k in range(1, len(route) - 1) if route[k] not in room and route[k] not in tunnel
-             and route[k - 1][0] != route[k + 1][0] and route[k - 1][1] != route[k + 1][1]]
-    rng.shuffle(turns)
-    for k in turns[:int(rng.integers(cfg.n_chamfer[0], cfg.n_chamfer[1] + 1))]:
-        c = np.array(route[k])
-        din, dout = c - np.array(route[k - 1]), np.array(route[k + 1]) - c
-        corner = centre(route[k]) + (din - dout) * cs / 2
-        mb.panel(corner - din * cs * 0.38, corner + dout * cs * 0.38, cfg.wall_t, -cfg.wall_h, 0.0, 'wall')
-    hurdle = None
-    straight = [route[k] for k in range(2, len(route) - 2) if route[k] not in room and route[k] not in tunnel
-                and (route[k - 1][0] == route[k + 1][0] or route[k - 1][1] == route[k + 1][1])]
-    if straight and rng.random() < cfg.p_hurdle:
-        c = straight[rng.integers(len(straight))]
-        k = idx[c]
-        along_x = route[k - 1][1] == route[k + 1][1]
-        lo = org + np.array(c) * cs
-        h = rng.uniform(*cfg.hurdle_h)
-        if along_x:
-            mb.box((lo[0] + cs / 2 - 0.03, lo[1], -h), (lo[0] + cs / 2 + 0.03, lo[1] + cs, 0.0), 'wall')
-        else:
-            mb.box((lo[0], lo[1] + cs / 2 - 0.03, -h), (lo[0] + cs, lo[1] + cs / 2 + 0.03, 0.0), 'wall')
-        hurdle = (c, float(h))
-    m = cfg.margin_m
-    for (lo, hi) in (((-W / 2 - m - .01, -H / 2 - m, -cfg.net_h), (-W / 2 - m, H / 2 + m, 0)),
-                     ((W / 2 + m, -H / 2 - m, -cfg.net_h), (W / 2 + m + .01, H / 2 + m, 0)),
-                     ((-W / 2 - m, -H / 2 - m - .01, -cfg.net_h), (W / 2 + m, -H / 2 - m, 0)),
-                     ((-W / 2 - m, H / 2 + m, -cfg.net_h), (W / 2 + m, H / 2 + m + .01, 0)),
-                     ((-W / 2 - m, -H / 2 - m, -cfg.net_h - .01), (W / 2 + m, H / 2 + m, -cfg.net_h))):
-        mb.box(lo, hi, 'net')
-    mesh = mb.build()
+    tube = None
+    if tube_where == 'corridor':
+        cands = [j for j in range(0 if not reverse else 1, K) if bay_run(j)[1] - bay_run(j)[0] >= 1.1]
+        if not cands:
+            return None
+        j = int(rng.choice(cands))
+        lo, hi, _ = bay_run(j)
+        L = min(hi - lo - 0.1, U(cfg.tunnel_len))
+        x0 = rng.uniform(lo + 0.05, hi - 0.05 - L)
+        yb = (bay_lo[j] + ys[j]) / 2
+        r = (ys[j] - bay_lo[j]) / 2 - 0.04
+        zc = max(r + 0.1, 0.62)
+        mb.tube((x0, yb), (x0 + L, yb), r, zc, 'tunnel')
+        tube = ('corridor', j)
+    if tube_where == 'connector':
+        tl = U(cfg.tunnel_len)
+        t_hi = d + tl * rng.uniform(0.4, 0.6)
+        t_lo = t_hi - tl
+        r = wc / 2 - 0.03
+        mb.tube((t_hi, yc + wc / 2), (t_lo, yc + wc / 2), r, r + 0.12, 'tunnel')
+        exit_x = t_lo
+        walls.append(((d, yc), (t_lo + 0.05, yc)))
+        tube = ('connector', None)
+    else:
+        exit_x = d - 0.25
 
+    # the room: diagonal from P (gB below the divider) down to the net at Q
+    gB = U(cfg.diag_gap)
+    yB = -hy + rng.uniform(0.45, 0.6) * 2 * hy
+    lean = U(cfg.diag_lean)
+    P, Q = np.array([d - gB, yB]), np.array([-hx, yB + lean])
+    if yB > yc - 0.9 or Q[1] < -hy + 2 * PAD_R + 0.2:
+        return None
+    # the far (pad-side) region holds the pad (forward) or the launch (reverse)
+    far = np.array([rng.uniform(-hx + PAD_R + 0.25, d - PAD_R - 0.35), -hy + PAD_R + rng.uniform(0.15, 0.5)])
+    if _seg_dist(far, P, Q) < PAD_R + 0.45:
+        return None
+    deflector = rng.random() < cfg.p_deflector
+    if deflector:
+        Ld, ang = rng.uniform(1.1, 1.7), math.radians(rng.uniform(10, 35))
+        a0 = np.array([min(exit_x, d) - 0.05, yc - 0.05])
+        a1 = a0 + Ld * np.array([-math.cos(ang), -math.sin(ang)])
+        if a1[0] < -hx + 1.0 or _seg_dist(a1, P, Q) < 1.0:
+            deflector = False
+        else:
+            walls.append((tuple(a0), tuple(a1)))
+    short = rng.random() < cfg.p_short_spur
+    if short:
+        y_lo, y_hi = far[1] + 0.5 * PAD_R, min(P[1], Q[1]) - 0.9
+        room = d - far[0] - PAD_R - 0.6
+        if y_hi <= y_lo or room < 0.6:
+            short = False
+        else:
+            y_s = rng.uniform(y_lo, y_hi)
+            walls.append(((d, y_s), (d - rng.uniform(0.6, min(1.1, room)), y_s)))
+
+    # route openings in forward order: spur gaps (with any across-corridor window in its bay), connector, diagonal
+    ww, wz, wh = U(cfg.window_w), U(cfg.window_z), U(cfg.window_h)
+    opens = []
+    window_gate, bypass = None, None
+    across_j = None
+    if win_where == 'across':
+        cands = [j for j in range(0 if not reverse else 1, K)
+                 if bay_run(j)[1] - bay_run(j)[0] >= 0.3 and not (tube and tube[0] == 'corridor' and tube[1] == j)]
+        if not cands:
+            win_where = 'none'
+        else:
+            across_j = int(rng.choice(cands))
+    spur_win = int(rng.integers(K)) if win_where == 'spur' else None
+    for i in range(K):
+        if i == across_j:
+            lo, hi, s = bay_run(i)
+            xm = rng.uniform(lo + 0.1, hi - 0.1)
+            c, dvec = _windowed_panel(mb, (xm, bay_lo[i]), (xm, ys[i]), cfg, rng.uniform(0.35, 0.65), ww, wz, wh)
+            opens.append(_gate('window_wall', None, c - dvec * ww / 2, c + dvec * ww / 2, (s, 0.0), wz + wh / 2))
+        a, b = walls[1 + i]
+        if i == spur_win:                              # window near the spur's anchored end: skips its free-end gap
+            anchor, free = (np.array(a), np.array(b)) if on_div[i] else (np.array(b), np.array(a))
+            Ls = np.linalg.norm(free - anchor)
+            if Ls < ww + 0.6:
+                spur_win = None
+            else:
+                c, dvec = _windowed_panel(mb, anchor, free, cfg, rng.uniform(0.3 + ww / 2, Ls - ww / 2 - 0.25) / Ls,
+                                          ww, wz, wh)
+                window_gate = _gate('window', None, c - dvec * ww / 2, c + dvec * ww / 2, (0.0, 1.0), wz + wh / 2)
+                bypass = len(opens)
+                walls[1 + i] = None
+        free_x = b[0] if on_div[i] else a[0]
+        opens.append(_gate(f'spur{i}', None, (free_x, ys[i]), (hx if on_div[i] else d, ys[i]), (0.0, 1.0)))
+    opens.append(_gate('connector', None, (exit_x, yc), (exit_x, hy), (-1.0, 0.0)))
+    if win_where == 'diag':
+        c, dvec = _windowed_panel(mb, Q, P, cfg, rng.uniform(0.25, 0.5), ww, wz, wh)
+        nrm = np.array([-dvec[1], dvec[0]])
+        nrm = -nrm if nrm[1] > 0 else nrm
+        window_gate = _gate('window', None, c - dvec * ww / 2, c + dvec * ww / 2, nrm, wz + wh / 2)
+        bypass = len(opens)
+    else:
+        walls.append((tuple(Q), tuple(P)))
+    opens.append(_gate('diag_top', None, P, (d, P[1]), (0.0, -1.0)))
+    for wl_ in walls:
+        if wl_ is not None:
+            mb.panel(wl_[0], wl_[1], cfg.wall_t, -cfg.wall_h, 0.0, 'wall')
+
+    if reverse:                                        # fly it backwards: start where the pad was, land in bay 0
+        opens = [dict(g, n=-g['n']) for g in opens[::-1]]
+        if window_gate is not None:
+            window_gate = dict(window_gate, n=-window_gate['n'])
+            bypass = len(opens) - 1 - bypass
+        launch = far
+        x_closed = d if on_div[0] else hx
+        pad = np.array([x_closed + (1 if on_div[0] else -1) * (PAD_R + 0.15), (-hy + ys[0]) / 2])
+    else:
+        pad = far
+        y0 = (-hy + ys[0]) / 2
+        launch = np.array([d + 0.45, y0]) if on_div[0] else np.array([hx - 0.45, y0])
+    # 4 gates in route order; keep the window wall and the opening a shortcut window bypasses
+    must = {k for k, g in enumerate(opens) if g['name'] == 'window_wall'} | ({bypass} if bypass is not None else set())
+    rest = [k for k in range(len(opens)) if k not in must]
+    pick = sorted(must | set(rng.choice(rest, size=4 - len(must), replace=False).tolist()))
     gates = []
-    room_k = min(idx[c] for c in room if c in idx)
-    for q in range(4):
-        k = min(max(int(round((q + 1) / 5 * room_k)), 1), room_k - 1)
-        ca, cb = centre(route[k - 1]), centre(route[k])
-        mid, d = (ca + cb) / 2, (cb - ca) / np.linalg.norm(cb - ca)
-        perp = np.array([-d[1], d[0]])
-        A, B = mid - perp * cs / 2, mid + perp * cs / 2
-        gates.append({'name': f'gate{q + 1}', 'cp': q, 'A': A, 'B': B, 't': (B - A) / np.linalg.norm(B - A),
-                      'L': float(np.linalg.norm(B - A)), 'n': d})
-    if window is not None:
-        a_, b_ = sorted(window, key=lambda c: idx[c])
-        ca, cb = centre(a_), centre(b_)
-        mid, d = (ca + cb) / 2, (cb - ca) / np.linalg.norm(cb - ca)
-        perp = np.array([-d[1], d[0]])
-        ww = cfg.window_wh[0]
-        A, B = mid - perp * ww / 2, mid + perp * ww / 2
-        gates.append({'name': 'window', 'cp': 3, 'A': A, 'B': B, 't': (B - A) / np.linalg.norm(B - A),
-                      'L': float(ww), 'n': d})
+    for cp, k in enumerate(pick):
+        gates.append(dict(opens[k], cp=cp))
+    if window_gate is not None and bypass in pick:
+        gates.append(dict(window_gate, cp=pick.index(bypass)))
     else:
         A = np.array([50.0, 50.0])
         gates.append({'name': 'window(none)', 'cp': 3, 'A': A, 'B': A + [0.1, 0], 't': np.array([1.0, 0.0]),
                       'L': 0.1, 'n': np.array([0.0, 1.0])})
-    theta = rng.uniform(-np.pi, np.pi) if cfg.rotate else 0.0
-    Rm = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]])
-    rot = lambda p: np.asarray(p, float) @ Rm.T                       # noqa: E731
-    pad = rot(padc)
-    s0, s1 = rot(centre(route[0])), rot(centre(route[1]))
-    yaw = float(math.atan2(s1[1] - s0[1], s1[0] - s0[0]))
-    pts = [rot(centre(c)) for c in route if c not in room] + [pad]
-    rt = np.array([[p[0], p[1], -0.8] for p in pts])
-    mesh.vertices[:, :2] = rot(mesh.vertices[:, :2]).astype(np.float32)
-    for gt in gates:
-        if not gt['name'].endswith('(none)'):
-            gt['A'], gt['B'], gt['t'], gt['n'] = rot(gt['A']), rot(gt['B']), rot(gt['t']), rot(gt['n'])
-    info = {'cells': (nx, ny), 'cell_m': float(cs), 'route_cells': len(route), 'open_cells': len(open_area - room),
-            'border_walls': bool(border_walls), 'rotation_deg': float(math.degrees(theta)), 'room': (int(rw), int(rh)),
-            'launch_yaw_tol': math.radians(cfg.launch_yaw_tol_deg), 'window': window is not None,
-            'tunnel': len(tunnel), 'tunnel_kind': 'round' if tunnel else None, 'hurdle': hurdle is not None,
-            'beam': False, 'boulders': len(objects), 'arena_m': (float(W), float(H))}
-    return GenCourse(mesh=mesh, gates=gates, pad_center=pad, pad_r=pad_r, launch=np.array([s0[0], s0[1], -0.08]),
-                     launch_yaw=yaw, route=rt, goal=np.array([pad[0], pad[1], -0.3]), info=info)
+    mb.box((-hx - 2, -hy - 2, 0.0), (hx + 2, hy + 2, 0.02), 'floor')
+    for x, y in (((-hx - .01, -hx), (-hy, hy)), ((hx, hx + .01), (-hy, hy)),
+                 ((-hx, hx), (-hy - .01, -hy)), ((-hx, hx), (hy, hy + .01))):
+        mb.box((x[0], y[0], -cfg.net_h), (x[1], y[1], 0.0), 'net')
+    mb.box((-hx, -hy, -cfg.net_h - .01), (hx, hy, -cfg.net_h), 'net')
+    mb.prism(pad[0], pad[1], PAD_R, -0.003, 0.0, 'paint', sides=32)
+    mb.prism(launch[0], launch[1], 0.15, -0.003, 0.0, 'paint', sides=12)
+    info = {'order': 'reverse' if reverse else 'forward', 'spurs': K, 'arena_m': (2 * hx, 2 * hy),
+            'bay_w': [round(float(v), 2) for v in w], 'tube': tube[0] if tube else None,
+            'window': win_where if (win_where != 'spur' or spur_win is not None) else 'none',
+            'deflector': bool(deflector), 'short_spur': bool(short),
+            'launch_yaw_tol': math.radians(cfg.launch_yaw_tol_deg)}
+    return dict(mesh=mb.build(), gates=gates, pad=pad, launch=launch, hx=hx, hy=hy, info=info,
+                windows=[g for g in opens + ([window_gate] if window_gate else []) if 'z' in g])
 
 
-# ── validation + gallery ─────────────────────────────────────────────────────────────────────────────────
-
-def check_solvable(c: GenCourse, clearance_m: float = 0.23, res: float = 0.08, device: str = 'cpu') -> Tuple[bool, float]:
-    """Is the pad reachable from the launch through 3-D free space (>= ``clearance_m`` from walls, tunnel roofs,
-    boulders, hurdles, beams; between 0.2 m and the wall tops)? Hurdles must be flown over, beams under, tunnels
-    through, so a fixed-altitude check is not enough. -> (ok, straight-line launch->pad distance m)."""
-    from scipy import ndimage
-
-    from dronehacks.path import build_grid
+def _objects(lay, rng, cfg, n):
+    """n floor objects of varied shape/size: off the walls, off the pad/launch/windows, each leaving a passage
+    (hugging a wall or >= 0.9 m from it). -> list of (kind, centre, footprint radius, builder fn)."""
     from dronehacks.render import MeshScene
-    sc = MeshScene(c.mesh.select(('wall', 'tunnel', 'boulder')), 1, device=device)
-    half = float(np.abs(c.mesh.select(('net',)).vertices[:, :2]).max()) - 0.1
-    grid = build_grid(sc.distance_at, np.array([-half, -half, -(WALL_H - 0.25)]), np.array([half, half, -0.2]), res)
-    free = grid.clear >= clearance_m
-    lab, _ = ndimage.label(free, structure=np.ones((3, 3, 3)))
-    a = lab[grid.index([c.launch[0], c.launch[1], -0.3])]
-    b = lab[grid.index([c.pad_center[0], c.pad_center[1], -0.3])]
-    return bool(a > 0 and a == b), float(np.linalg.norm(c.launch[:2] - c.pad_center))
+    sc = MeshScene(lay['mesh'].select(('wall', 'tunnel', 'net')), 1, device='cpu')
+    hx, hy = lay['hx'], lay['hy']
+    out = []
+    for _ in range(n * 20):
+        if len(out) >= n:
+            break
+        kind = rng.choice(['rock', 'rock', 'crate', 'cone', 'bench'])
+        rot = rng.uniform(0, np.pi)
+        if kind == 'rock':
+            r, h = rng.uniform(0.1, 0.35), rng.uniform(0.2, 0.9)
+            R, sides, r1 = r, int(rng.integers(5, 10)), r * rng.uniform(0.4, 0.9)
+        elif kind == 'crate':
+            a_, b_, h = rng.uniform(0.25, 0.7), rng.uniform(0.25, 0.7), rng.uniform(0.2, 0.8)
+            R = 0.5 * math.hypot(a_, b_)
+        elif kind == 'cone':
+            r, h = rng.uniform(0.1, 0.2), rng.uniform(0.3, 0.75)
+            R = r
+        else:
+            a_, b_, h = rng.uniform(0.8, 1.5), rng.uniform(0.25, 0.4), rng.uniform(0.35, 0.5)
+            R = 0.5 * math.hypot(a_, b_)
+        p = np.array([rng.uniform(-hx + R, hx - R), rng.uniform(-hy + R, hy - R)])
+        dw = float(sc.distance_at(np.array([[p[0], p[1], -0.3]]))[0])
+        if dw < R + 0.03 or (0.15 < dw - R < 0.75):
+            continue
+        if (np.linalg.norm(p - lay['pad']) < PAD_R + R + 0.05 or np.linalg.norm(p - lay['launch']) < R + 0.6
+                or any(np.linalg.norm(p - (g['A'] + g['B']) / 2) < R + 0.7 for g in lay['windows'])
+                or any(np.linalg.norm(p - q) < R + rq + 0.25 for _, q, rq, _ in out)):
+            continue
+        if kind == 'rock':
+            fn = (lambda mb, p=p, r=r, r1=r1, h=h, s=sides, rot=rot: mb.frustum(p[0], p[1], r, r1, h, 'boulder', s, rot))
+        elif kind == 'cone':
+            fn = (lambda mb, p=p, r=r, h=h: mb.frustum(p[0], p[1], r, 0.02, h, 'boulder', 12))
+        else:
+            dvec = np.array([math.cos(rot), math.sin(rot)])
+            fn = (lambda mb, p=p, a_=a_, b_=b_, h=h, dvec=dvec:
+                  mb.panel(p - dvec * a_ / 2, p + dvec * a_ / 2, b_, -h, 0.0, 'boulder'))
+        out.append((str(kind), p, R, fn))
+    return out
 
 
-def plot_top(c: GenCourse, ax) -> None:
+def _finish(lay, rng, cfg, plan) -> Optional[GenCourse]:
+    objs = _objects(lay, rng, cfg, int(rng.integers(cfg.n_objects[0], cfg.n_objects[1] + 1)))
+    mirror = rng.random() < 0.5
+    k90 = int(rng.integers(4))
+    th = k90 * math.pi / 2
+    R = np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]]) @ np.diag([1.0, -1.0 if mirror else 1.0])
+    tf = lambda p: np.asarray(p, float) @ R.T          # noqa: E731
+    gates = []
+    for g in lay['gates']:
+        if g['name'].endswith('(none)'):
+            gates.append(g)
+        else:
+            gates.append(dict(g, A=tf(g['A']), B=tf(g['B']), t=tf(g['t']), n=tf(g['n'])))
+    launch, pad = tf(lay['launch']), tf(lay['pad'])
+    while True:
+        ob = _MeshBuilder()
+        for *_, fn in objs:
+            fn(ob)
+        mesh = _concat([lay['mesh']] + ([ob.build()] if objs else []))
+        mesh.vertices[:, :2] = tf(mesh.vertices[:, :2]).astype(np.float32)
+        if mirror:
+            mesh.faces[:] = mesh.faces[:, ::-1]
+        c = GenCourse(mesh=mesh, gates=gates, pad_center=pad, pad_r=PAD_R,
+                      launch=np.array([launch[0], launch[1], -0.08]), launch_yaw=0.0, route=np.zeros((0, 3)),
+                      goal=np.array([pad[0], pad[1], -0.3]),
+                      info=dict(lay['info'], mirror=bool(mirror), rot_deg=k90 * 90, objects=len(objs),
+                                object_kinds=sorted({k for k, *_ in objs})))
+        if not plan:
+            return c
+        try:
+            c.route, c.route_window = plan_course(c, cfg.min_clear_m)
+            break
+        except Exception:
+            if not objs:
+                return None
+            objs = objs[:-1]                            # an object closed a passage: drop one and replan
+    k = min(len(c.route) - 1, int(np.searchsorted(np.cumsum(np.r_[0, np.linalg.norm(np.diff(c.route[:, :2], axis=0), axis=1)]), 0.7)))
+    dv = c.route[k, :2] - c.route[0, :2]
+    c.launch_yaw = float(math.atan2(dv[1], dv[0]))     # facing the way the route leaves the start
+    c.info['objects'] = len(objs)
+    return c
+
+
+# ── planned path ─────────────────────────────────────────────────────────────────────────────────────────
+
+def plan_path_through(mesh: CourseMesh, waypoints, clear_m: float = 0.3, res: float = 0.08,
+                      device: str = 'cpu') -> np.ndarray:
+    """Shortest comfortable 3-D path (A*, dronehacks.path) visiting ``waypoints`` (NED xy or xyz) in order, at
+    cruise height between waypoints. -> (N,3) NED polyline, corners rounded."""
+    from dronehacks.path import build_grid, plan_path, round_corners, shortcut
+    from dronehacks.render import MeshScene
+    sc = MeshScene(mesh.select(('wall', 'tunnel', 'boulder', 'net')), 1, device=device)
+    v = mesh.select(('net',)).vertices
+    lo = np.array([v[:, 0].min() + 0.1, v[:, 1].min() + 0.1, -1.45])
+    hi = np.array([v[:, 0].max() - 0.1, v[:, 1].max() - 0.1, -0.45])
+    grid = build_grid(sc.distance_at, lo, hi, res)
+    wps = [np.array([p[0], p[1], p[2] if len(p) > 2 else -CRUISE_ALT], float) for p in waypoints]
+    free = grid.clear >= clear_m
+    fidx = np.argwhere(free)
+    if not len(fidx):
+        raise RuntimeError('no free space')
+
+    def snap(p):                                      # a waypoint too close to something: nearest free voxel
+        i = np.asarray(grid.index(p))
+        if free[tuple(i)]:
+            return p
+        j = fidx[np.argmin(((fidx - i) ** 2).sum(1))]
+        if np.abs(j - i).max() * grid.res > 0.5:
+            raise RuntimeError(f'waypoint {np.round(p, 2)} is boxed in')
+        return grid.centre(j)
+    wps = [snap(p) for p in wps]
+    out = [wps[0][None]]
+    for a, b in zip(wps[:-1], wps[1:]):
+        seg = plan_path(grid, a, b, clear_m)
+        out.append(seg[1:])
+    pts = np.concatenate(out)
+    pts = shortcut(sc.distance_at, pts, clear_m)
+    return round_corners(sc.distance_at, pts, clear_m)
+
+
+def _gate_wp(g, back=0.0):
+    m = (np.asarray(g['A']) + np.asarray(g['B'])) / 2 + np.asarray(g['n']) * back
+    return np.array([m[0], m[1], -float(g.get('z', CRUISE_ALT))])
+
+
+def plan_course(c: 'GenCourse', clear_m: float = 0.3):
+    """Launch -> cp 0..3 -> pad, plus the window-shortcut variant (None without one). Each gate is entered from
+    0.3 m before it and left 0.3 m past it (at its height: windows sit above cruise), so the path really crosses it."""
+    lp = np.array([c.launch[0], c.launch[1], -CRUISE_ALT])
+    pad = np.array([c.pad_center[0], c.pad_center[1], -CRUISE_ALT])
+    main = [lp]
+    for g in c.gates[:4]:
+        main += [_gate_wp(g, -0.3), _gate_wp(g, 0.3)]
+    tight = any('z' in g for g in c.gates[:4])           # a window on the main route
+    route = plan_path_through(c.mesh, main + [pad], min(clear_m, 0.2) if tight else clear_m)
+    rw = None
+    win = c.gates[4]
+    if not win['name'].endswith('(none)'):
+        alt = [lp]
+        for g in c.gates[:4]:
+            if g['cp'] == win['cp']:
+                g = win
+            alt += [_gate_wp(g, -0.3), _gate_wp(g, 0.3)]
+        try:
+            rw = plan_path_through(c.mesh, alt + [pad], min(clear_m, 0.18))
+        except Exception:
+            rw = None
+    return route, rw
+
+
+# ── review: top-down sheet + orbit video ─────────────────────────────────────────────────────────────────
+
+def plot_top(c: GenCourse, ax, title: Optional[str] = None) -> None:
     from matplotlib.patches import Circle
     g = c.mesh.face_group
     v = c.mesh.vertices
     for grp, col, z in (('wall', '#4a4f57', 2), ('tunnel', '#3fa66b', 3), ('boulder', '#4f7fd6', 4)):
-        tri = c.mesh.faces[g == GROUP_ID[grp]]
-        if len(tri):
-            for t in tri:
-                p = v[t][:, :2]
-                ax.fill(p[:, 1], p[:, 0], color=col, lw=0, zorder=z, alpha=0.9 if grp != 'tunnel' else 0.35)
+        for t in c.mesh.faces[g == GROUP_ID[grp]]:
+            p = v[t][:, :2]
+            ax.fill(p[:, 1], p[:, 0], color=col, lw=0, zorder=z, alpha=0.9 if grp != 'tunnel' else 0.35)
+    nv = c.mesh.select(('net',)).vertices
+    ax.plot([nv[:, 1].min(), nv[:, 1].max(), nv[:, 1].max(), nv[:, 1].min(), nv[:, 1].min()],
+            [nv[:, 0].min(), nv[:, 0].min(), nv[:, 0].max(), nv[:, 0].max(), nv[:, 0].min()], color='#7a9cc6', lw=1)
     ax.add_patch(Circle((c.pad_center[1], c.pad_center[0]), c.pad_r, fill=False, ec='#2a9d3a', lw=2, zorder=6))
-    ax.plot(c.route[:, 1], c.route[:, 0], color='#f2b33d', lw=1.2, ls='--', zorder=5)
+    if c.route_window is not None and len(c.route_window):
+        ax.plot(c.route_window[:, 1], c.route_window[:, 0], color='#9b5de5', lw=1.3, ls='--', zorder=5)
+    if len(c.route):
+        ax.plot(c.route[:, 1], c.route[:, 0], color='#e63946', lw=1.8, zorder=5)
     for gt in c.gates:
         if gt['name'].endswith('(none)'):
             continue
-        col = '#d1495b' if gt['name'] != 'window' else '#9b5de5'
+        col = '#f4a259' if gt['name'] != 'window' else '#9b5de5'
         ax.plot([gt['A'][1], gt['B'][1]], [gt['A'][0], gt['B'][0]], color=col, lw=2.5, zorder=7)
-        m = (gt['A'] + gt['B']) / 2
-        ax.annotate('', xy=(m[1] + 0.25 * gt['n'][1], m[0] + 0.25 * gt['n'][0]), xytext=(m[1], m[0]),
-                    arrowprops=dict(arrowstyle='->', color=col, lw=1.5), zorder=7)
-    ax.annotate('', xy=(c.launch[1] + 0.45 * math.sin(c.launch_yaw), c.launch[0] + 0.45 * math.cos(c.launch_yaw)),
+    ax.annotate('', xy=(c.launch[1] + 0.5 * math.sin(c.launch_yaw), c.launch[0] + 0.5 * math.cos(c.launch_yaw)),
                 xytext=(c.launch[1], c.launch[0]), arrowprops=dict(arrowstyle='-|>', color='black', lw=2), zorder=8)
     i = c.info
-    ax.set_title(f"seed {i['seed']}  {i['cells'][0]}x{i['cells'][1]} @{i['cell_m']:.2f}m  route {i['route_cells']}"
-                 f"{'  win' if i['window'] else ''}{('  ' + i['tunnel_kind'] + ' tun') if i['tunnel'] else ''}{'  hurdle' if i['hurdle'] else ''}"
-                 f"{'  beam' if i['beam'] else ''}", fontsize=7)
+    if title is None:
+        title = (f"seed {i.get('seed')} {i['order']} {i['spurs']}sp  tube:{i['tube'] or '-'}  win:{i['window']}"
+                 f"  obj {i.get('objects', 0)}")
+    ax.set_title(title, fontsize=7)
     ax.set_aspect('equal')
     ax.set_xticks([])
     ax.set_yticks([])
 
 
+def real_course() -> GenCourse:
+    """The real course in GenCourse form (gates from rules.py), with its planned paths."""
+    import os
+    from dronehacks import rules
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets')
+    mesh = CourseMesh.load(os.path.join(root, 'course.npz'))
+    import json
+    lm = json.load(open(os.path.join(root, 'scene.json')))['landmarks']
+    mark, pad = np.array(lm['launch_mark_ned'][:2]), np.array(lm['landing_pad_ned'][:2])
+    gates = [dict(g) for g in rules.GATES]
+    c = GenCourse(mesh=mesh, gates=gates, pad_center=pad, pad_r=PAD_R, launch=np.array([mark[0], mark[1], -0.08]),
+                  launch_yaw=0.0, route=np.zeros((0, 3)), goal=np.array([pad[0], pad[1], -0.3]),
+                  info={'order': 'forward', 'spurs': 3, 'arena_m': (6.1, 6.1), 'tube': 'connector', 'window': 'diag'})
+    c.route, c.route_window = plan_course(c)
+    return c
+
+
 _COL = {'floor': (0.78, 0.74, 0.66), 'wall': (0.62, 0.64, 0.68), 'tunnel': (0.25, 0.68, 0.45),
-        'boulder': (0.35, 0.52, 0.85), 'paint': (0.85, 0.25, 0.22), 'net': (0.55, 0.68, 0.85)}
+        'boulder': (0.35, 0.52, 0.85), 'paint': (0.95, 0.62, 0.20), 'net': (0.55, 0.68, 0.85)}
 
 
-def orbit_video(mesh: CourseMesh, path: str, seconds: float = 8.0, fps: int = 30, size=(640, 400),
-                radius: float = 8.0, elev_deg: float = 38.0, label: str = '', marks=None, device: str = 'cpu') -> None:
-    """Real-time shaded orbit (MP4, x264 CRF 18) around a course. ``marks``: [(north, east, rgb)] floor markers."""
+def _path_ribbon(mb, pts, r=0.035):
+    for a, b in zip(pts[:-1], pts[1:]):
+        if np.linalg.norm(b[:2] - a[:2]) < 1e-4:
+            continue
+        mb.panel(a[:2], b[:2], 2 * r, min(a[2], b[2]) - r, max(a[2], b[2]) + r, 'paint')
+
+
+def orbit_video(c, path: str, seconds: float = 10.0, fps: int = 30, size=(800, 500),
+                radius: float = 8.0, elev_deg: float = 42.0, label: str = '', device: str = 'cpu') -> None:
+    """Real-time shaded orbit (MP4, x264 CRF 18) of a course: walls, tube, boulders, pad, and the planned path
+    (red; window variant purple). ``c``: GenCourse."""
     import os
     import shutil
     import subprocess
@@ -504,25 +674,47 @@ def orbit_video(mesh: CourseMesh, path: str, seconds: float = 8.0, fps: int = 30
 
     from dronehacks.mesh import GROUPS
     from dronehacks.render import MeshScene
-    view = mesh.select(('floor', 'wall', 'tunnel', 'boulder', 'paint'))
+    view = c.mesh.select(('floor', 'wall', 'tunnel', 'boulder', 'paint'))
     col = np.array([_COL[g] for g in GROUPS])[view.face_group]
+    extra, ecol = [], []
+    for pts, rgb in ((c.route, (0.90, 0.15, 0.20)), (c.route_window, (0.62, 0.36, 0.90))):
+        if pts is None or not len(pts):
+            continue
+        mb = _MeshBuilder()
+        _path_ribbon(mb, pts[::2] if len(pts) > 400 else pts)
+        extra.append(mb.build())
+        ecol.append(np.tile(rgb, (len(extra[-1].faces), 1)))
+    if extra:
+        vs, fs, gs, os_ = [view.vertices], [view.faces], [view.face_group], [view.face_object]
+        n = len(view.vertices)
+        for m in extra:
+            vs.append(m.vertices)
+            fs.append(m.faces + n)
+            gs.append(m.face_group)
+            os_.append(m.face_object)
+            n += len(m.vertices)
+        view = CourseMesh(np.concatenate(vs), np.concatenate(fs).astype(np.int32), np.concatenate(gs),
+                          np.concatenate(os_))
+        col = np.concatenate([col] + ecol)
     W, H = size
     n, chunk = int(seconds * fps), 15
     f = 0.5 * W / math.tan(math.radians(55.0) / 2)
     sc = MeshScene(view, chunk, W, H, f, f, 60.0, device=device)
     exe = shutil.which('ffmpeg') or os.environ.get('FFMPEG')
+    if exe is None:
+        raise SystemExit('ffmpeg not found (module load ffmpeg, or set FFMPEG)')
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     proc = subprocess.Popen([exe, '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{W}x{H}',
                              '-r', str(fps), '-i', '-', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p',
                              '-movflags', '+faststart', path], stdin=subprocess.PIPE)
     bg = np.array([0.06, 0.07, 0.10])
-    target = np.array([0.0, 0.0, -0.5])
-    extent = float(np.abs(view.select(('wall', 'tunnel', 'boulder')).vertices[:, :2]).max())
-    radius = max(radius, 2.6 * extent)                # keep the whole arena in frame
+    target = np.array([0.0, 0.0, -0.4])
+    extent = float(np.abs(c.mesh.select(('wall', 'tunnel', 'boulder')).vertices[:, :2]).max())
+    radius = max(radius, 2.3 * extent)
     for c0 in range(0, n, chunk):
         idx = np.arange(c0, min(c0 + chunk, n))
         az = 2 * np.pi * idx / n + 0.6
-        el = math.radians(elev_deg) + math.radians(8) * np.sin(2 * np.pi * idx / n)
+        el = math.radians(elev_deg) + math.radians(10) * np.sin(2 * np.pi * idx / n)
         g = radius * np.cos(el)
         cam = np.stack([target[0] + g * np.cos(az), target[1] + g * np.sin(az), target[2] - radius * np.sin(el)], 1)
         d = target - cam
@@ -533,12 +725,14 @@ def orbit_video(mesh: CourseMesh, path: str, seconds: float = 8.0, fps: int = 30
         r, fc, cs = sc.render_shaded(torch.from_numpy(pos), torch.from_numpy(rpy))
         for k in range(len(idx)):
             hit = fc[k] >= 0
-            rgb = col[np.maximum(fc[k], 0)] * (0.3 + 0.7 * cs[k])[..., None]
+            rgb = col[np.maximum(fc[k], 0)] * (0.35 + 0.65 * cs[k])[..., None]
             fog = np.exp(-np.maximum(r[k], 0) / 40.0)[..., None]
             img = np.where(hit[..., None], rgb * fog + bg * (1 - fog), bg)
             im = Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
             if label:
-                ImageDraw.Draw(im).text((10, 8), label, fill=(235, 235, 235))
+                dr = ImageDraw.Draw(im)
+                dr.text((10, 8), label, fill=(235, 235, 235))
+                dr.text((10, H - 20), 'red: planned path   purple: window shortcut   orange: pad', fill=(200, 200, 200))
             proc.stdin.write(np.asarray(im).tobytes())
     proc.stdin.close()
     if proc.wait() != 0:
@@ -553,49 +747,42 @@ def main(argv=None) -> None:
     g = sub.add_parser('gallery')
     g.add_argument('--n', type=int, default=20)
     g.add_argument('--seed0', type=int, default=0)
+    g.add_argument('--real', action='store_true', help='first panel = the real course')
     g.add_argument('--out', default='out/coursegen')
-    o = sub.add_parser('orbit', help='3-D orbit videos (MP4) of generated courses (and the real one with --real)')
+    o = sub.add_parser('orbit', help='3-D orbit videos (MP4) with the planned path (and the real course with --real)')
     o.add_argument('--seeds', type=int, nargs='+', default=[1, 5, 12])
     o.add_argument('--real', action='store_true')
     o.add_argument('--out', default='out/coursegen')
     a = ap.parse_args(argv)
     if a.cmd == 'orbit':
-        import os
         if a.real:
-            real = CourseMesh.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'course.npz'))
-            orbit_video(real, os.path.join(a.out, 'orbit_real.mp4'), label='real DroneHacks course')
+            orbit_video(real_course(), os.path.join(a.out, 'orbit_real.mp4'), label='REAL DroneHacks course')
         for sd in a.seeds:
             c = generate(sd)
             i = c.info
-            orbit_video(c.mesh, os.path.join(a.out, f'orbit_seed{sd}.mp4'),
-                        label=f"generated seed {sd}: {i['cells'][0]}x{i['cells'][1]} cells @{i['cell_m']:.2f} m"
-                              f"{', window' if i['window'] else ''}{', ' + i['tunnel_kind'] + ' tunnel' if i['tunnel'] else ''}"
-                              f"{', hurdle' if i['hurdle'] else ''}{', beam' if i['beam'] else ''}")
+            orbit_video(c, os.path.join(a.out, f'orbit_seed{sd}.mp4'),
+                        label=f"generated seed {sd}: {i['order']} order, {i['spurs']} spurs, tube: {i['tube'] or 'none'}, "
+                              f"window: {i['window']}, {i.get('objects', 0)} floor objects")
         print('wrote orbit videos to', a.out)
         return
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     os.makedirs(a.out, exist_ok=True)
+    courses = ([('REAL course', real_course())] if a.real else []) + [(None, generate(a.seed0 + k)) for k in range(a.n)]
     cols = 5
-    rows = math.ceil(a.n / cols)
+    rows = math.ceil(len(courses) / cols)
     fig, axs = plt.subplots(rows, cols, figsize=(cols * 3.2, rows * 3.4))
-    stats = []
-    for k in range(a.n):
-        c = generate(a.seed0 + k)
-        ok, L = check_solvable(c)
-        stats.append((ok, L))
-        ax = axs.flat[k]
-        plot_top(c, ax)
-        ax.set_xlabel(f"{'solvable' if ok else 'BLOCKED'}", fontsize=7)
-    for ax in axs.flat[a.n:]:
+    for ax, (t, c) in zip(axs.flat, courses):
+        plot_top(c, ax, t)
+    for ax in axs.flat[len(courses):]:
         ax.axis('off')
-    fig.suptitle('Generated courses (top-down, north up): walls grey, tunnel roof green, boulders blue, gates red '
-                 '(arrow = travel), window gate purple, route dashed, start arrow black, pad ring green', fontsize=9)
+    fig.suptitle('Courses (top-down, north up): walls grey, tube green, boulders blue, gates orange (window purple), '
+                 'planned path red (window shortcut purple dashed), start arrow black, pad ring green', fontsize=9)
     fig.tight_layout()
     path = os.path.join(a.out, 'gallery.png')
     fig.savefig(path, dpi=110)
-    print(f'wrote {path}; solvable {sum(o for o, _ in stats)}/{len(stats)}')
+    print(f'wrote {path}')
 
 
 if __name__ == '__main__':

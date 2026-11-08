@@ -181,9 +181,11 @@ def main(argv=None) -> None:
     speed = np.linalg.norm(np.gradient(pos, 1.0 / FPS, axis=0), axis=1)
     print(f'{a.checkpoint}: {a.start} start (cell {cell}, try {attempt + 1}): {outcome} after {ts[-1]:.1f} s, '
           f'{points:.1f} points')
-    course = env.layouts[0].mesh if getattr(env, 'layouts', None) else \
+    k = int(env._bank_course[cell]) if getattr(env, '_pack', False) else 0      # a pack: the cell's own course
+    course = env.layouts[k].mesh if getattr(env, 'layouts', None) else \
         CourseMesh.load(os.path.join(env.cfg.assets_dir, 'course.npz'))    # the flown layout (as-built mods)
-    mark, pad = env._mark[0].cpu().numpy(), env._pad_c[0].cpu().numpy()
+    mark, pad = ((env._v_mark[k].cpu().numpy(), env._v_pad[k].cpu().numpy()) if getattr(env, "_pack", False) else
+                 (env._mark[0].cpu().numpy(), env._pad_c[0].cpu().numpy()))
     circles = [(pad[0], pad[1], rules.PAD_RADIUS_M, (80, 220, 120)),
                (mark[0], mark[1], rules.RETURN_RADIUS_M, (255, 210, 60))]
     step_of = np.minimum((t / 0.1).astype(int), len(phases) - 1)

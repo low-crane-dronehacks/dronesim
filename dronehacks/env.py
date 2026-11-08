@@ -147,6 +147,9 @@ class CourseEnvCfg:
     perturb_seed: int = 0
     perturb_ramp_steps: int = 0          # 'spread': ramp allowed severity over this many env steps
     perturb_start_clearance: float = 0.15
+    # course pack (coursepack.py): train on its K generated courses instead of the real course. Each bank cell
+    # belongs to one course and an env flies that course; '' = the real course (assets/course.npz etc.)
+    course_pack: str = ''
     # plant
     v_max: tuple = (5.0, 3.0, 2.0)       # forward, right, down (m/s), yaw-aligned body frame
     yaw_rate_max: float = LEE_MAX_YAW_RATE
@@ -196,36 +199,68 @@ class CourseEnv:
         t = lambda x, dt=torch.float32: torch.as_tensor(np.asarray(x), dtype=dt, device=dev)      # noqa: E731
 
         # ── geometry: K layouts (1 = the exact course) stacked into one mesh ─────────
-        course = CourseMesh.load(os.path.join(cfg.assets_dir, cfg.course_file))
-        route = Route.load(os.path.join(cfg.assets_dir, 'route.npz'))
-        with open(os.path.join(cfg.assets_dir, 'scene.json')) as f:
-            mark_xy = np.asarray(json.load(f)['landmarks']['launch_mark_ned'][:2], np.float64)
         rc = cfg.realism
         if isinstance(rc, dict):
             rc = cfg.realism = RealismCfg(**rc)
         if rc is not None and rc.vio_pos and not cfg.pos_obs:
             raise ValueError('realism vio_pos models the position input: it needs CourseEnvCfg.pos_obs (--pos-obs)')
-        K = max(1, int(cfg.perturb_variants)) if cfg.perturb > 0 else 1
-        if cfg.perturb_mode not in ('fixed', 'spread'):
-            raise ValueError("perturb_mode must be 'fixed' or 'spread'")
-        sev = ([cfg.perturb] * K if cfg.perturb_mode == 'fixed' else
-               [cfg.perturb * k / max(K - 1, 1) for k in range(K)]) if K > 1 else [0.0]
-        if rc is not None and rc.net and K == 1:          # nominal course, but K different rooms behind the net
-            K = max(1, rc.clutter_variants)
-            sev = [0.0] * K
-        variants = cp.build_variants(
-            course, self._gates(), cs.PAD_CENTER, mark_xy, np.asarray(route.goal, np.float64), severities=sev,
-            seed=cfg.perturb_seed, launch_xy=mark_xy, extra_boulders=tuple(cfg.extra_boulders), mods=cfg.course_mods,
-            scale=cfg.perturb_scale, cp0_wall=cfg.cp0_wall, anchor_wall=cfg.anchor_wall, gate_extend=cfg.gate_extend,
-            clearance_factory=lambda m: MeshScene(m, 1, device='cpu').distance_at)
-        lays = variants.layouts
+        self._pack = bool(cfg.course_pack)
+        if self._pack:
+            # a pack is K generated courses, each with its own gates / pad / mark / route / bank. Everything that
+            # edits or perturbs THE real course has no meaning here: refuse it rather than silently ignore it
+            if mode != 'none':
+                raise ValueError(f'course_pack supports return_mode none only (got {mode!r}): packs have no '
+                                 'return-leg banks')
+            bad = [n for n, on in (('perturb', cfg.perturb > 0), ('course_mods', bool(cfg.course_mods)),
+                                   ('gate_extend', cfg.gate_extend), ('cp0_wall', bool(cfg.cp0_wall)),
+                                   ('anchor_wall', bool(cfg.anchor_wall)),
+                                   ('extra_boulders', tuple(cfg.extra_boulders) != (0, 0)),
+                                   ('course_file', cfg.course_file != 'course.npz'),
+                                   ('window_gate', bool(cfg.window_gate)),
+                                   ('arena_half', cfg.arena_half != 3.0),
+                                   ('launch_yaw_max_deg', cfg.launch_yaw_max_deg < 180)) if on]
+            if bad:
+                raise ValueError(f'course_pack cannot be combined with {", ".join(bad)}: those edit or perturb the '
+                                 'real course (pack courses are fixed; each has its own net size and launch heading)')
+            from dronehacks.coursepack import load_pack, resolve_pack
+            pack = load_pack(resolve_pack(cfg.course_pack, cfg.assets_dir))
+            lays = [cp.Layout(0.0, c.mesh, c.gates, np.asarray(c.pad_center, np.float64),
+                              np.asarray(c.mark, np.float64), np.asarray(c.goal, np.float64), {}) for c in pack]
+            if any(len(lay.gates) != len(cs.GATES) for lay in lays):
+                raise ValueError(f'course_pack: every course needs {len(cs.GATES)} gates (rules.GATES layout)')
+            self.pack_seeds = [c.seed for c in pack]
+            self.layout_info = {'course_pack': cfg.course_pack, 'seeds': self.pack_seeds}
+            mark_xy = None
+            net_halves = [np.asarray(c.arena_half, np.float64) + 0.05 for c in pack]   # arena_half = net - 0.05
+        else:
+            course = CourseMesh.load(os.path.join(cfg.assets_dir, cfg.course_file))
+            route = Route.load(os.path.join(cfg.assets_dir, 'route.npz'))
+            with open(os.path.join(cfg.assets_dir, 'scene.json')) as f:
+                mark_xy = np.asarray(json.load(f)['landmarks']['launch_mark_ned'][:2], np.float64)
+            K = max(1, int(cfg.perturb_variants)) if cfg.perturb > 0 else 1
+            if cfg.perturb_mode not in ('fixed', 'spread'):
+                raise ValueError("perturb_mode must be 'fixed' or 'spread'")
+            sev = ([cfg.perturb] * K if cfg.perturb_mode == 'fixed' else
+                   [cfg.perturb * k / max(K - 1, 1) for k in range(K)]) if K > 1 else [0.0]
+            if rc is not None and rc.net and K == 1:          # nominal course, but K different rooms behind the net
+                K = max(1, rc.clutter_variants)
+                sev = [0.0] * K
+            variants = cp.build_variants(
+                course, self._gates(), cs.PAD_CENTER, mark_xy, np.asarray(route.goal, np.float64), severities=sev,
+                seed=cfg.perturb_seed, launch_xy=mark_xy, extra_boulders=tuple(cfg.extra_boulders), mods=cfg.course_mods,
+                scale=cfg.perturb_scale, cp0_wall=cfg.cp0_wall, anchor_wall=cfg.anchor_wall, gate_extend=cfg.gate_extend,
+                clearance_factory=lambda m: MeshScene(m, 1, device='cpu').distance_at)
+            lays = variants.layouts
+            self.layout_info = {'severities': [float(x) for x in variants.severities], 'attempts': variants.attempts,
+                                'rejected': variants.rejected}
+            net_halves = [3.05] * len(lays)
         self.layouts = lays                               # (video.py draws the flown layout, e.g. as-built mods)
+        self._n_lay = len(lays)                           # distinct layouts (pack: courses), before the net copy
         # ramped training with the see-through net: every layout twice, net drawn (effects off) / see-through
         self._net_split = len(lays) if (rc is not None and rc.net and rc.ramp_steps > 0) else 0
         if self._net_split:
             lays = lays + lays
-        self.layout_info = {'severities': [float(x) for x in variants.severities], 'attempts': variants.attempts,
-                            'rejected': variants.rejected}
+            net_halves = net_halves + net_halves
 
         def stacked(grp):
             return cp.stack_variants([lay.mesh.select(grp) for lay in lays])
@@ -238,7 +273,7 @@ class CourseEnv:
             rng = np.random.default_rng(rc.seed)
             mesh, offs = cp.stack_variants([
                 lay.mesh.select(('floor', 'wall', 'tunnel', 'boulder', 'net')) if i < self._net_split else
-                concat_meshes(lay.mesh.select(('floor', 'wall', 'tunnel', 'boulder')), room_clutter(rng, rc))
+                concat_meshes(lay.mesh.select(('floor', 'wall', 'tunnel', 'boulder')), room_clutter(rng, rc, net_halves[i]))
                 for i, lay in enumerate(lays)])
         else:
             groups = ('floor', 'wall', 'tunnel', 'boulder') + (('net',) if cfg.net_in_depth else ())
@@ -260,8 +295,8 @@ class CourseEnv:
         self._v_mark = t([lay.mark for lay in lays])
         # launch starts sit on the taped mark: a layout whose mark moved (a 'shift:...:mark' course mod, e.g. the centre
         # wall moved north) moves its launch-type bank starts by the same offset
-        self._v_lshift = t([np.asarray(lay.mark, np.float64) - mark_xy for lay in lays])
-        self._shifted_launch = any(m.startswith('shift:') and m.endswith(':mark') for m in (cfg.course_mods or '').split(';'))
+        self._v_lshift = t([np.asarray(lay.mark, np.float64) - (lay.mark if mark_xy is None else mark_xy) for lay in lays])
+        self._shifted_launch = not self._pack and any(m.startswith('shift:') and m.endswith(':mark') for m in (cfg.course_mods or '').split(';'))
         self._v_gP0 = t([[g['A'] for g in lay.gates] for lay in lays])             # (K,G,2)
         self._v_gt = t([[g['t'] for g in lay.gates] for lay in lays])
         self._v_gn = t([[g['n'] for g in lay.gates] for lay in lays])
@@ -279,7 +314,28 @@ class CourseEnv:
         self._env_steps = 0
 
         # ── reset bank + route ─────────────────────────────────────────────────
-        bank = Bank.load(os.path.join(cfg.assets_dir, cfg.bank_file))
+        if self._pack:
+            # one bank / route per course, concatenated; each cell carries its course id, each course its own slice
+            # of the route arrays [r0, r1) so the progress feature stays on the env's own course
+            bank = Bank.concat(*[c.bank for c in pack])
+            nr = np.array([len(c.route.points) for c in pack])
+            r0 = np.concatenate([[0], np.cumsum(nr)[:-1]])
+            route = Route(np.concatenate([c.route.points for c in pack]), np.concatenate([c.route.s for c in pack]),
+                          np.zeros(3, np.float32))
+            course_id = np.concatenate([np.full(len(c.bank), k) for k, c in enumerate(pack)])
+            ridx = np.concatenate([r0[k] + np.minimum(np.searchsorted(c.route.s, c.bank.route_s), nr[k] - 1)
+                                   for k, c in enumerate(pack)])
+            sector = np.concatenate([c.sector for c in pack])
+            self._v_r0, self._v_r1 = t(r0, torch.long), t(r0 + nr, torch.long)
+            self._v_rlen = t([c.route.length for c in pack])
+            self._v_ggeo = t([c.gate_geo for c in pack])                              # (K,G)
+            self._v_gcp = t([[g['cp'] for g in c.gates] for c in pack], torch.long)    # (K,G)
+            self._v_arena = t([c.arena_half for c in pack])                            # (K,2)
+            self._r0, self._r1 = self._v_r0[0].repeat(e), self._v_r1[0].repeat(e)
+            self._rlen = self._v_rlen[0].repeat(e)
+            self._arena = self._v_arena[0].repeat(e, 1)
+        else:
+            bank = Bank.load(os.path.join(cfg.assets_dir, cfg.bank_file))
         if mode in ('handoff', 'return'):                 # run policy: run starts only; return policy: return starts
             keep = (bank.phase == 0) if mode == 'handoff' else (bank.phase > 0)
             if not keep.any():
@@ -293,13 +349,19 @@ class CourseEnv:
             for c in cfg.launch_yaw_centers_deg:
                 near |= np.abs(wrap(bank.yaw - np.radians(c))) <= np.radians(cfg.launch_yaw_max_deg)
             keep &= ~launch | near
-            idx = np.clip(np.searchsorted(route.s, bank.route_s), 0, len(route.s) - 1)
+            # (a pack's route is every course's route concatenated: index it per course, not by arc length)
+            idx = ridx if self._pack else np.clip(np.searchsorted(route.s, bank.route_s), 0, len(route.s) - 1)
             tan = route.tangent()[idx]
             along = np.arctan2(tan[:, 1], tan[:, 0])                                 # NED heading of the route there
             keep &= launch | (np.abs(wrap(bank.yaw - along)) <= np.radians(cfg.start_heading_max_deg))
             print(f'[env] heading filter: kept {int(keep[launch].sum())}/{int(launch.sum())} launch, '
                   f'{int(keep[~launch].sum())}/{int((~launch).sum())} other starts', flush=True)
             bank = Bank(*(getattr(bank, k)[keep] for k in ('pos', 'yaw', 'route_s', 'kind', 'vel', 'roll', 'pitch', 'geo', 'phase')))
+            if self._pack:                                # the per-cell course arrays follow the bank
+                course_id, ridx, sector = course_id[keep], ridx[keep], sector[keep]
+        if self._pack:
+            self._bank_course, self._bank_ridx = t(course_id, torch.long), t(ridx, torch.long)
+            self._course = torch.zeros(e, dtype=torch.long, device=dev)          # the course each env flies
         self._route_pts, self._route_s = t(route.points), t(route.s)
         self._route_len = float(route.length)
         self._bank_pos, self._bank_yaw = t(bank.pos), t(bank.yaw)
@@ -381,13 +443,16 @@ class CourseEnv:
         self._shape_cp = torch.full((e,), -1, dtype=torch.long, device=dev)
         self._start_geo = torch.zeros(e, device=dev)
         self._last_geo = torch.zeros(e, device=dev)
-        with open(os.path.join(cfg.assets_dir, 'scoring.json')) as f:
-            self._gate_geo = t(json.load(f)['gate_geodesic_m'])
-        self._gcp = t(cs.GATE_CP, torch.long)
+        if self._pack:
+            self._gcp = self._v_gcp[0].view(G, 1).repeat(1, e)                     # (G,E): per-course gate cps
+        else:
+            with open(os.path.join(cfg.assets_dir, 'scoring.json')) as f:
+                self._gate_geo = t(json.load(f)['gate_geodesic_m'])
+            self._gcp = t(cs.GATE_CP, torch.long)
         self._cp_pts = t(cs.CP_POINTS)
         self._pad_r = float(cs.PAD_RADIUS_M)
         self._gate_tol = 0.1                                                     # slack along the line, m
-        self._bank_sector = t(cs.sector_index(bank.pos[:, :2]), torch.long)
+        self._bank_sector = t(sector if self._pack else cs.sector_index(bank.pos[:, :2]), torch.long)
 
         self._reset_idx(torch.arange(e, device=dev))
         self._reset_stats()
@@ -480,7 +545,10 @@ class CourseEnv:
         S_ = sub.shape[0]
         clearance = self._obst.min_distance_batch(sub + self._off.unsqueeze(0), cfg.collision_radius + 0.3).view(S_, -1).amin(0)
         collision = clearance < cfg.collision_radius
-        oob = (sub[..., :2].abs() > cfg.arena_half).any(-1).any(0) | (alt > cfg.net_top).any(0)
+        if self._pack:                                            # per-course net size
+            oob = (sub[..., :2].abs() > self._arena).any(-1).any(0) | (alt > cfg.net_top).any(0)
+        else:
+            oob = (sub[..., :2].abs() > cfg.arena_half).any(-1).any(0) | (alt > cfg.net_top).any(0)
         pts_step, success, floor = self._score_step(sub, prev, alt)
         if self._mode == 'handoff':
             pts_step = pts_step + self._disarm(disarm)
@@ -549,14 +617,17 @@ class CourseEnv:
         self._flag |= over
         self._ever_over |= over
         nc = self._next_cp
-        skip = (crossed & (self._gcp.unsqueeze(1) > nc.unsqueeze(0))).any(0) if cfg.skip_terminal else torch.zeros_like(run)
-        hit = crossed & (self._gcp.unsqueeze(1) == nc.unsqueeze(0))        # (G,E): a gate of the NEXT checkpoint
+        gcp = self._gcp if self._gcp.dim() == 2 else self._gcp.unsqueeze(1)   # (G,E) with a pack, else (G,1)
+        skip = (crossed & (gcp > nc.unsqueeze(0))).any(0) if cfg.skip_terminal else torch.zeros_like(run)
+        hit = crossed & (gcp == nc.unsqueeze(0))                           # (G,E): a gate of the NEXT checkpoint
         cleared = hit.any(0)
         factor = torch.where(self._flag, torch.full_like(t_now, cs.OVER_WALL_FACTOR), torch.ones_like(t_now))
         pts = self._cp_pts[nc.clamp(max=4)] * factor * cleared
         gidx = hit.long().argmax(0)
-        self._via |= cleared & hit[cs.WINDOW_GATE] & ~hit[3]
-        self._last_geo = torch.where(cleared, self._gate_geo[gidx], self._last_geo)
+        # through the window, not the main-route gate of the same checkpoint (gate 3 on the real course)
+        self._via |= cleared & hit[cs.WINDOW_GATE] & ~hit[:cs.WINDOW_GATE].any(0)
+        ggeo = self._v_ggeo[self._course, gidx] if self._pack else self._gate_geo[gidx]
+        self._last_geo = torch.where(cleared, ggeo, self._last_geo)
         self._t_last = torch.where(cleared, t_now, self._t_last)
         # == _cleared[ar[cleared], nc[cleared]] = True without the boolean-mask host sync (a cleared env's nc <= 3)
         self._cleared[ar, nc.clamp(max=4)] |= cleared
@@ -705,11 +776,23 @@ class CourseEnv:
         self._gt[:, 0, ids] = self._v_gt[k].transpose(0, 1)
         self._gn[:, 0, ids] = self._v_gn[k].transpose(0, 1)
         self._gL[:, 0, ids] = self._v_gL[k].transpose(0, 1)
+        if self._pack:                                   # per-course arrays: layout k is course k % n (net copy)
+            c = k % self._n_lay
+            self._course[ids] = c
+            self._gcp[:, ids] = self._v_gcp[c].transpose(0, 1)
+            self._r0[ids], self._r1[ids], self._rlen[ids] = self._v_r0[c], self._v_r1[c], self._v_rlen[c]
+            self._arena[ids] = self._v_arena[c]
 
     def _choose_variant(self, ids: torch.Tensor, cells: torch.Tensor) -> None:
         """Each resetting env draws a layout; one that puts the start within ``perturb_start_clearance`` of a
         wall is redrawn (up to 6 times), then the nominal layout 0 is used."""
         cfg = self.cfg
+        if self._pack:                                   # the drawn cell's course (its see-through-net copy if on)
+            k = self._bank_course[cells]
+            if self._net_split:
+                k = k + self.real.mask[ids].long() * self._net_split
+            self._assign_variant(ids, k)
+            return
         if len(self._v_sev) == 1:
             return
         allowed = torch.arange(len(self._v_sev), device=self.device)
@@ -742,7 +825,8 @@ class CourseEnv:
         tgt = mid + self._gn[:, 0] * (self.cfg.cp_margin + 0.15)
         d_g = torch.linalg.vector_norm(tgt - pos2.unsqueeze(0), dim=-1)                        # (G,E)
         nc = self._next_cp
-        d_g = torch.where(self._gcp.view(-1, 1) == nc.view(1, -1), d_g, torch.full_like(d_g, float('inf')))
+        gcp = self._gcp if self._gcp.dim() == 2 else self._gcp.view(-1, 1)        # (G,E) with a pack, else (G,1)
+        d_g = torch.where(gcp == nc.view(1, -1), d_g, torch.full_like(d_g, float('inf')))
         best = tgt[d_g.argmin(0), torch.arange(pos2.shape[0], device=pos2.device)]
         return torch.where((nc >= 4).unsqueeze(-1), self._pad_c[:, :2], best)
 
@@ -811,8 +895,11 @@ class CourseEnv:
                 self.real.vio_pos_reset(ids, s_fl, (kind == 0) | lift, p.pos_ned, p.rpy_ned()[:, 2], p.vel_ned)
             if self._pose_hist is not None:                       # a fresh episode has no older frames
                 self._pose_hist[:, ids] = torch.cat([self.plant.pos_ned, self.plant.rpy_ned()], -1)[ids]
-        self._route_idx[ids] = torch.clamp(torch.searchsorted(self._route_s, self._bank_s[cells]),
-                                           max=len(self._route_s) - 1)
+        if self._pack:                                  # the cell's own course's slice of the concatenated route
+            self._route_idx[ids] = self._bank_ridx[cells]
+        else:
+            self._route_idx[ids] = torch.clamp(torch.searchsorted(self._route_s, self._bank_s[cells]),
+                                               max=len(self._route_s) - 1)
         self.episode_length_buf.index_fill_(0, ids, 0)
         self._path.index_fill_(0, ids, 0.0)
         self._last_pos[ids] = p0
@@ -855,7 +942,11 @@ class CourseEnv:
         """Nearest route point in a window around the last one (critic progress feature)."""
         r = self._route_pts.shape[0]
         offs = torch.arange(-back, ahead + 1, device=self.device)
-        win = torch.clamp(self._route_idx.unsqueeze(1) + offs, 0, r - 1)           # (E,W)
+        if self._pack:                                   # stay inside this env's course's slice of the route
+            win = torch.maximum(torch.minimum(self._route_idx.unsqueeze(1) + offs, self._r1.unsqueeze(1) - 1),
+                                self._r0.unsqueeze(1))
+        else:
+            win = torch.clamp(self._route_idx.unsqueeze(1) + offs, 0, r - 1)           # (E,W)
         d = torch.linalg.vector_norm(self._route_pts[win] - self.plant.pos_ned.unsqueeze(1), dim=-1)
         self._route_idx = win.gather(1, d.argmin(dim=1, keepdim=True)).squeeze(1)
 
@@ -891,7 +982,7 @@ class CourseEnv:
         to_goal = self._goal - pos
         dist = torch.linalg.vector_norm(to_goal, dim=-1, keepdim=True)
         goal_body = (rot.transpose(1, 2) @ (to_goal / dist.clamp(min=1e-6)).unsqueeze(-1)).squeeze(-1)
-        progress = self._route_s[self._route_idx] / self._route_len
+        progress = self._route_s[self._route_idx] / (self._rlen if self._pack else self._route_len)
         return torch.cat([
             pos / 3.0, p.vel_ned / 2.0, p.rpy_ned(), p.ang_vel_b / 3.0,
             p.applied_thrust / (p.mass * 9.81 / 4.0) - 1.0, self._prev_action,
@@ -993,6 +1084,8 @@ class CourseEnv:
                                      'returned', 'ret_collision', 'ret_floor', 'ret_oob', 'ret_timeout')}
         self._stat.update(sev_sum=0.0, speed_sum=0.0, points_sum=0.0, t_fin=0.0, cp_started=[0] * 5, cp_cleared=[0] * 5)
         self._stat_kind = {k: [0, 0, 0, 0, 0, 0] for k in KIND_NAMES}   # episodes, successes, collision, floor, oob, timeout
+        if self._pack:
+            self._stat_course = torch.zeros(3, self._n_lay, device=self.device)    # episodes, successes, points
 
     def _accumulate(self, ids, success, collision, floor, oob, truncated, returned) -> None:
         """Add the finished episodes ``ids`` to the running stats. Every count/sum is computed on the GPU and
@@ -1024,6 +1117,9 @@ class CourseEnv:
                   ('speed_sum', (self._path[ids] / (el.clamp(min=1) * CONTROL_DT)).sum()),
                   ('points_sum', self._ep_points[ids].sum()),
                   ('t_fin', torch.where(sx, self._t_last[ids], torch.zeros_like(self._t_last[ids])).sum())]
+        if self._pack:                                   # per-course episodes / successes / points (stays on the GPU)
+            self._stat_course.index_add_(1, self._course[ids], torch.stack([torch.ones_like(self._ep_points[ids]),
+                                                                            sx.float(), self._ep_points[ids]]))
         kinds = torch.where(self._liftoff[ids], torch.full_like(self._bank_kind[self._cell[ids]], LIFTOFF_KIND),
                             self._bank_kind[self._cell[ids]])
         onehot = kinds.unsqueeze(1) == torch.arange(len(KIND_NAMES), device=kinds.device).unsqueeze(0)   # (n,K)
@@ -1075,6 +1171,12 @@ class CourseEnv:
                 out['ret_fail_' + k] = s['ret_' + k] / pk if pk else nan
         if self.real is not None:
             out['realism_on'] = float(self.real.mask.float().mean())
+        if self._pack:
+            sc = self._stat_course.cpu().numpy()
+            for k, seed in enumerate(self.pack_seeds):
+                if sc[0, k]:
+                    out[f'success_course{seed}'] = float(sc[1, k] / sc[0, k])
+                    out[f'points_course{seed}'] = float(sc[2, k] / sc[0, k])
         out.update(self.sgs.stats())
         self._reset_stats()
         return out

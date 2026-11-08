@@ -2,6 +2,10 @@
 
     python -m dronehacks.evaluate checkpoints/comp_s2.pt
     python -m dronehacks.evaluate runs/my_run/checkpoints/model_2000.pt --perturb 0.5
+    python -m dronehacks.evaluate runs/gen10_s1/checkpoints/model_2000.pt --course-pack assets/packs/heldout5.npz
+
+The real course is the default, also for a checkpoint trained on a course pack; ``--course-pack`` evaluates on a
+pack instead and adds a per-course breakdown (``by_course``, keyed by coursegen seed).
 
 Conditions, each a FIXED queue of start cells per env (so fast episodes are not over-counted):
   launch    the exact launch pose: the competition run (only the rotor time constants / gains vary)
@@ -110,6 +114,8 @@ def main(argv=None) -> None:
     ap.add_argument('--plant', default=None, help='airframe profile json (e.g. assets/plant_nominal.json, the template for a measured drone)')
     ap.add_argument('--realism', default='', help="real-world effects: 'real' (all) or e.g. 'depth,velocity' "
                                                    '(presets in realism.py; stress.py runs them one by one)')
+    ap.add_argument('--course-pack', default='', help="evaluate on a course pack (e.g. assets/packs/heldout5.npz); "
+                                                      "default '' = the real course")
     ap.add_argument('--out', default=None, help='json path (default: next to the checkpoint)')
     ap.add_argument('--speed-cap', type=float, default=0.0, help='clamp the commanded |v| (m/s), as the drone interface does')
     ap.add_argument('--yaw-cap', type=float, default=0.0, help='clamp the commanded yaw rate (rad/s)')
@@ -125,11 +131,25 @@ def main(argv=None) -> None:
     ap.add_argument('--course-mods', default=None, help="as-built course changes (perturb.apply_mods), e.g. 'drop:wall5;rot:wall3:30:30:south'")
     ap.add_argument('--course', default=None, help='geometry file in assets/ (e.g. course_scan.npz: the scanned real course)')
     a = ap.parse_args(argv)
+    if a.course_pack and a.perturb:
+        raise SystemExit('--course-pack and --perturb are exclusive')
+    pack_kw = {}
+    if a.course_pack:
+        bad = [f for f, v in (('--course-mods', a.course_mods), ('--cp0-wall', a.cp0_wall), ('--anchor-wall', a.anchor_wall),
+                              ('--gate-extend', a.gate_extend or None), ('--course', a.course),
+                              ('--extra-boulders', a.extra_boulders), ('--min-start-clearance', a.min_start_clearance or None))
+               if v is not None]
+        if bad:
+            raise SystemExit(f'--course-pack cannot be combined with {" ".join(bad)} (they edit the real course)')
+        # a real-course checkpoint's own course edits do not apply to pack courses: drop them
+        pack_kw = dict(course_mods='', cp0_wall='', anchor_wall='', gate_extend=False, extra_boulders=(0, 0),
+                       course_file='course.npz', arena_half=3.0, launch_yaw_max_deg=180.0)
 
     from dronehacks.realism import parse
     env, policy = load_policy(a.checkpoint, a.envs, a.device, a.seed, perturb=a.perturb,
                               perturb_variants=a.perturb_variants, perturb_mode='fixed', perturb_seed=a.perturb_seed,
-                              perturb_ramp_steps=0, realism=parse(a.realism, seed=a.seed) if a.realism else None,
+                              perturb_ramp_steps=0, course_pack=a.course_pack, **pack_kw,
+                              realism=parse(a.realism, seed=a.seed) if a.realism else None,
                               **({'plant_params': load_plant(a.plant)} if a.plant else {}),
                               **({'course_file': a.course} if a.course else {}),
                               **({'course_mods': a.course_mods} if a.course_mods is not None else {}),
@@ -142,6 +162,15 @@ def main(argv=None) -> None:
                               **({'gate_extend': True} if a.gate_extend else {}),
                               **({'cmd_speed_cap': a.speed_cap} if a.speed_cap else {}),
                               **({'cmd_yaw_cap': a.yaw_cap} if a.yaw_cap else {}))
+    course = env._bank_course.cpu().numpy() if env._pack else None
+
+    def summary(rec, pts):
+        r = summarise(rec, pts)
+        if course is not None:                             # per-course breakdown, keyed by coursegen seed
+            cid = course[rec[2]]
+            r['by_course'] = {str(seed): summarise(rec[:, cid == k], pts[cid == k])
+                              for k, seed in enumerate(env.pack_seeds)}
+        return r
     kind = env._bank_kind.cpu().numpy()
     rng = np.random.default_rng(a.seed)
     e = env.num_envs
@@ -149,7 +178,8 @@ def main(argv=None) -> None:
     pools = {'launch': (BANK_LAUNCH,)}
     if env._rp:
         pools.update(pad=(BANK_PAD,), climb=(BANK_CLIMB,), cross=(BANK_CROSS,), final=(BANK_FINAL,))
-    result = {'checkpoint': a.checkpoint, 'seed': a.seed, 'perturb': a.perturb, 'realism': a.realism, 'course': a.course}
+    result = {'checkpoint': a.checkpoint, 'seed': a.seed, 'perturb': a.perturb, 'realism': a.realism, 'course': a.course,
+              'course_pack': a.course_pack}
     for name, kinds in pools.items():
         pool = np.nonzero(np.isin(kind, kinds))[0]
         if a.min_start_clearance > 0 and len(pool):
@@ -164,7 +194,7 @@ def main(argv=None) -> None:
             pool = pool[clr >= a.min_start_clearance]
         if len(pool):
             rec, pts = run_queue(env, policy, torch.as_tensor(rng.choice(pool, size=(e, per_env))))
-            result[name] = summarise(rec[:, :a.episodes], pts[:a.episodes])
+            result[name] = summary(rec[:, :a.episodes], pts[:a.episodes])
     if a.cells % e:
         raise SystemExit(f'--cells ({a.cells}) must be a multiple of --envs ({e})')
     for name, k in (('route', BANK_NEAR_ROUTE), ('free', BANK_BODY)):
@@ -173,14 +203,19 @@ def main(argv=None) -> None:
             continue
         cells = rng.choice(pool, size=a.cells, replace=len(pool) < a.cells)
         rec, pts = run_queue(env, policy, torch.as_tensor(cells.reshape(e, -1)))
-        result[name] = summarise(rec, pts)
+        result[name] = summary(rec, pts)
 
     for name, r in result.items():
         if isinstance(r, dict):
             print(f"{name:7s} points {r['mean_points']:5.1f}/60  success {r['success'] * 100:5.1f}%  "
                   f"collision {r['collision'] * 100:5.1f}%  floor {r['floor'] * 100:5.1f}%  "
                   f"timeout {r['timeout'] * 100:5.1f}%  (n={r['episodes']})")
-    out = a.out or os.path.splitext(a.checkpoint)[0] + f'_eval_s{a.seed}' + (f'_p{a.perturb:g}' if a.perturb else '') + (f"_{a.realism.replace(',', '+')}" if a.realism else '') + '.json'
+            for seed, rc in r.get('by_course', {}).items():
+                print(f"   course {seed:>4s} points {rc['mean_points']:5.1f}/60  success {rc['success'] * 100:5.1f}%  "
+                      f"collision {rc['collision'] * 100:5.1f}%  (n={rc['episodes']})")
+    out = a.out or os.path.splitext(a.checkpoint)[0] + f'_eval_s{a.seed}' + (f'_p{a.perturb:g}' if a.perturb else '') + \
+        (f'_pack-{os.path.splitext(os.path.basename(a.course_pack))[0]}' if a.course_pack else '') + \
+        (f"_{a.realism.replace(',', '+')}" if a.realism else '') + '.json'
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, 'w') as f:
         json.dump(result, f, indent=1)
