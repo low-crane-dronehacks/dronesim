@@ -52,12 +52,3 @@ band (left-edge invalid band) and the deploy-side edge fill applied. Success % /
 | perturbed layouts (v5h3) | - | 79.5 / 34.2 | 77.0 / 32.4 |
 | perturbed layouts (published map) | - | 81.4 / 38.3 | 76.0 / 36.3 |
 | wall 0 + window at scanned position | 12.7 / 28.0 | 53.7 / 32.6 | 19.5 / 28.6 |
-
-## Limitations
-
-- Trained on one course family (the competition course, perturbed). Transfer to unseen, procedurally generated
-  courses is currently ~0%; from-scratch training on generated courses is in progress.
-- Sensitive to the exact window-wall geometry (see the last table row); fine-tunes on the scanned geometry are
-  in progress.
-- The return-leg policy does not yet work on the as-built course.
-- Sim-to-real transfer has not yet been validated in flight.

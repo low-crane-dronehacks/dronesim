@@ -1,6 +1,6 @@
 # dronehacks-sim
 
-Approach, robustness measures, evaluation results and limitations: [docs/APPROACH.md](docs/APPROACH.md)
+Approach, robustness measures and evaluation results: [docs/APPROACH.md](docs/APPROACH.md)
 
 GPU simulator and RL training for the **DroneHacks 2026** course, the Stanford indoor drone race.
 Thousands of quadrotors fly the exact course mesh in parallel. They see a depth camera and a downward
