@@ -1,0 +1,11 @@
+{
+ "_comment": "Nominal airframe used for training. Copy to plant_<name>.json, replace with measured values, and pass it as CourseEnvCfg.plant_params (or --plant). Units: kg, kg m^2, m, N, s, 1/s.",
+ "mass": 1.5,
+ "inertia": [0.012, 0.012, 0.020],
+ "arm": 0.13,
+ "torque_to_thrust": 0.07,
+ "thrust_range": [0.1, 10.0],
+ "motor_tau_range": [0.025, 0.035],
+ "c_drag": 0.25,
+ "c_ang": 0.05
+}

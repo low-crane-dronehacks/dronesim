@@ -14,7 +14,7 @@ def _fly(steps=20):
 
 
 def test_trajectory_matches_reference_plant():
-    """Pinned reference trajectory for TorchQuad."""
+    """Pinned against the original training TorchQuad the shipped checkpoints were trained on (bit-identical)."""
     q = _fly()
     ref = torch.tensor([[7.475132465362549, -4.342502052168129e-06, -1.142246127128601],
                         [-1.1265339851379395, -0.18999958038330078, -1.841422438621521]])

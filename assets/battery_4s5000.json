@@ -1,0 +1,9 @@
+{
+ "_comment": "4S 5000 mAh LiPo. TYPICAL values until measured: replace r_pack_ohm (charger IR x 4 + wiring), hover_power_w (hover current x voltage from a flight log) and v_ref (the voltage the motor constants were measured at).",
+ "cells": 4,
+ "capacity_mah": 5000.0,
+ "r_pack_ohm": 0.020,
+ "hover_power_w": 200.0,
+ "hover_thrust_n": 14.715,
+ "v_ref": 16.0
+}

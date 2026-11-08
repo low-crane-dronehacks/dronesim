@@ -1,5 +1,7 @@
 # dronehacks-sim
 
+Approach, robustness measures, evaluation results and limitations: [docs/APPROACH.md](docs/APPROACH.md)
+
 GPU simulator and RL training for the **DroneHacks 2026** course, the Stanford indoor drone race.
 Thousands of quadrotors fly the exact course mesh in parallel. They see a depth camera and a downward
 rangefinder, and they are scored by the competition rules.
@@ -36,6 +38,22 @@ python -m dronehacks.train --run-id my_run
 python -m dronehacks.train --run-id my_pert --perturb 1.0               # layout randomisation
 python -m dronehacks.train --run-id my_ret --return-phase               # + the return leg
 ```
+
+### Real-world eval (`eval-realism` branch)
+
+```bash
+python -m dronehacks.stress checkpoints/comp_s2.pt                   # each real-world effect alone, then all
+python -m dronehacks.evaluate checkpoints/comp_s2.pt --realism real  # everything on
+python -m dronehacks.evaluate checkpoints/comp_s2.pt --realism depth,velocity --plant assets/plant_kit.json
+```
+
+Effects (`dronehacks/realism.py`, all off by default): `plant` (true airframe differs from nominal, PX4-like
+velocity loop), `battery` (thrust sag), `latency` (late commands), `velocity` (VIO estimate: lag, noise, bias,
+dropouts), `depth` (OAK-D stereo at 640x400: noise, min range, holes, occlusion shadows, latency), `net`
+(see-through boundary net with a random room behind it), `rangefinder` (dropouts). `real` = all of them;
+`real_lite` / `depth_lite` = cheap versions for training. `vio_pos` (+ `train.py --pos-obs`) adds a VIO-like course-frame
+position/yaw input to the actor (calibrated by `python -m dronehacks.vio_calib` -> `assets/vio_sigma.json`). Magnitudes are best guesses; replace with
+measurements (`assets/plant_nominal.json` is the template for the measured drone).
 
 Runs go to `runs/<run-id>/` (`metrics.jsonl`, `checkpoints/`, `config.json`). Re-running a run id resumes it.
 

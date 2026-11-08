@@ -48,7 +48,7 @@ def test_climb_from_launch(env):
 
 
 def test_return_flag_before_landing_is_terminal():
-    e = _env(num_envs=2, return_phase=True, bank_file='bank_return_v2.npz', max_episode_s=90.0)
+    e = _env(num_envs=2, return_phase=True, bank_file='bank_return_v3.npz', max_episode_s=90.0)
     _queue(e, BANK_LAUNCH)
     _, _, done, _ = e.step(torch.tensor([[0., 0., 0., 0., 1.]]).repeat(2, 1))
     assert done.all()
@@ -56,7 +56,7 @@ def test_return_flag_before_landing_is_terminal():
 
 
 def test_pad_start_waits_for_flag_then_releases():
-    e = _env(num_envs=2, return_phase=True, bank_file='bank_return_v2.npz', max_episode_s=90.0)
+    e = _env(num_envs=2, return_phase=True, bank_file='bank_return_v3.npz', max_episode_s=90.0)
     _queue(e, BANK_PAD)
     start = e.plant.pos_ned.clone()
     for _ in range(5):                                    # parked: climbing without the flag does nothing
@@ -85,7 +85,7 @@ def test_handoff_disarm_finishes_the_run_and_flag_in_the_air_is_a_crash():
 
 
 def test_return_policy_starts_released_and_has_no_flag():
-    e = _env(num_envs=2, return_mode='return', bank_file='bank_return_v2.npz')
+    e = _env(num_envs=2, return_mode='return', bank_file='bank_return_v3.npz')
     assert e.num_actions == 4 and e.proprio_dim == 10
     assert (e._bank_phase > 0).all()                             # return-leg starts only
     _queue(e, BANK_PAD)

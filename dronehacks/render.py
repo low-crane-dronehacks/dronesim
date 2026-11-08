@@ -105,12 +105,56 @@ def mesh_rays_kernel(
     out[i] = r
 
 
+@wp.kernel
+def mesh_shaded_kernel(
+    mesh: wp.uint64,
+    pos: wp.array2d(dtype=wp.float32),
+    rpy: wp.array2d(dtype=wp.float32),
+    width: int,
+    height: int,
+    fx: float,
+    fy: float,
+    far: float,
+    rng: wp.array3d(dtype=wp.float32),          # (E,H,W) range in metres, -1 = miss
+    face: wp.array3d(dtype=wp.int32),           # (E,H,W) hit triangle, -1 = miss
+    cosine: wp.array3d(dtype=wp.float32),       # (E,H,W) |n . ray|, headlight shading
+):
+    e, v, u = wp.tid()
+    bx = 1.0
+    by = ((wp.float32(u) + 0.5) - 0.5 * wp.float32(width)) / fx
+    bz = ((wp.float32(v) + 0.5) - 0.5 * wp.float32(height)) / fy
+    c_r = wp.cos(rpy[e, 0])
+    s_r = wp.sin(rpy[e, 0])
+    c_p = wp.cos(rpy[e, 1])
+    s_p = wp.sin(rpy[e, 1])
+    c_y = wp.cos(rpy[e, 2])
+    s_y = wp.sin(rpy[e, 2])
+    dx = (c_y * c_p) * bx + (c_y * s_p * s_r - s_y * c_r) * by + (c_y * s_p * c_r + s_y * s_r) * bz
+    dy = (s_y * c_p) * bx + (s_y * s_p * s_r + c_y * c_r) * by + (s_y * s_p * c_r - c_y * s_r) * bz
+    dz = (-s_p) * bx + (c_p * s_r) * by + (c_p * c_r) * bz
+    inv_len = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    d = wp.vec3(dx * inv_len, dy * inv_len, dz * inv_len)
+    q = wp.mesh_query_ray(mesh, wp.vec3(pos[e, 0], pos[e, 1], pos[e, 2]), d, far)
+    rng[e, v, u] = -1.0
+    face[e, v, u] = -1
+    cosine[e, v, u] = 0.0
+    if q.result:
+        rng[e, v, u] = q.t
+        face[e, v, u] = q.face
+        cosine[e, v, u] = wp.abs(wp.dot(q.normal, d))
+
+
 class MeshScene:
     """Depth images, obstacle distance and raw rays over one static mesh, batched over E poses."""
 
     def __init__(self, course: CourseMesh, num_envs: int, width: int = 2, height: int = 2,
                  fx: float = 1.0, fy: float = 1.0, far_clip: float = 10.0,
-                 near_clip: float = DEPTH_NEAR_CLIP, depth_type: str = 'range', device: str = 'cuda:0'):
+                 near_clip: float = DEPTH_NEAR_CLIP, depth_type: str = 'range', device: str = 'cuda:0',
+                 bvh_constructor: str = 'sah', bvh_leaf_size=None):
+        """``bvh_constructor``: Warp's default on the GPU is 'lbvh' (fast to build); a CPU-built SAH tree takes
+        ~0.2 s for the 600k-triangle stacked course and halves the depth raycast (54 -> 28 ms at 768 envs x
+        640x400). Same hits: a different tree only changes which of two coincident triangles is reported
+        (float32-ulp differences in depth, ~2e-5 of pixels)."""
         if depth_type not in _DEPTH_TYPES:
             raise ValueError(f'depth_type must be one of {sorted(_DEPTH_TYPES)}')
         if far_clip <= near_clip:
@@ -126,7 +170,8 @@ class MeshScene:
         self._points = wp.array(np.ascontiguousarray(course.vertices, np.float32), dtype=wp.vec3, device=self.device)
         self._indices = wp.array(np.ascontiguousarray(course.faces, np.int32).ravel(), dtype=wp.int32,
                                  device=self.device)
-        self._mesh = wp.Mesh(points=self._points, indices=self._indices, support_winding_number=False)
+        self._mesh = wp.Mesh(points=self._points, indices=self._indices, support_winding_number=False,
+                             bvh_constructor=bvh_constructor, bvh_leaf_size=bvh_leaf_size)
         self._depth = wp.zeros((self.num_envs, self.height, self.width), dtype=wp.float32, device=self.device)
         self._distance = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._depth_view = wp.to_torch(self._depth)
@@ -141,12 +186,34 @@ class MeshScene:
                   outputs=[self._depth], device=self.device)
         return self._depth_view
 
-    def min_obstacle_distance(self, pos_ned) -> torch.Tensor:
-        """(E,3) -> (E,) unsigned distance to the nearest triangle (persistent buffer: clone to keep it)."""
+    def min_obstacle_distance(self, pos_ned, max_dist: float = NO_OBSTACLE_DISTANCE) -> torch.Tensor:
+        """(E,3) -> (E,) unsigned distance to the nearest triangle (persistent buffer: clone to keep it).
+        ``max_dist`` caps the BVH search (far cheaper): anything farther reads ``max_dist``."""
         pos = self._as_warp(pos_ned, 'pos_ned')
-        wp.launch(mesh_distance_kernel, dim=self.num_envs, inputs=[self._mesh.id, pos, float(NO_OBSTACLE_DISTANCE)],
+        wp.launch(mesh_distance_kernel, dim=self.num_envs, inputs=[self._mesh.id, pos, float(max_dist)],
                   outputs=[self._distance], device=self.device)
         return self._distance_view
+
+    def distance_capped(self, points: torch.Tensor, max_dist: float) -> torch.Tensor:
+        """(N,3) torch NED points -> fresh (N,) distance, capped at ``max_dist``. Any N; no persistent buffer."""
+        pts = points.reshape(-1, 3).contiguous().float()
+        out = torch.empty(pts.shape[0], device=pts.device, dtype=torch.float32)
+        if pts.shape[0]:
+            wp.launch(mesh_distance_kernel, dim=pts.shape[0], inputs=[self._mesh.id, wp.from_torch(pts), float(max_dist)],
+                      outputs=[wp.from_torch(out)], device=self.device)
+        return out
+
+    def min_distance_batch(self, points: torch.Tensor, max_dist: float) -> torch.Tensor:
+        """(N,3) torch NED points -> (N,) distance, capped at ``max_dist`` (a small cap prunes the BVH search: a
+        collision test only needs to know what is within the radius). One launch for any N."""
+        pts = points.reshape(-1, 3).contiguous().float()
+        n = pts.shape[0]
+        if getattr(self, '_bdist', None) is None or self._bdist.shape[0] != n:
+            self._bdist = wp.zeros(n, dtype=wp.float32, device=self.device)
+            self._bdist_view = wp.to_torch(self._bdist)
+        wp.launch(mesh_distance_kernel, dim=n, inputs=[self._mesh.id, wp.from_torch(pts), float(max_dist)],
+                  outputs=[self._bdist], device=self.device)
+        return self._bdist_view
 
     def distance_at(self, points) -> np.ndarray:
         """(N,3) NED points -> (N,) numpy distance to the nearest triangle (any N; for planning)."""
@@ -157,6 +224,18 @@ class MeshScene:
                           float(NO_OBSTACLE_DISTANCE)],
                   outputs=[out], device=self.device)
         return out.numpy()
+
+    def render_shaded(self, pos_ned, rpy_ned):
+        """For pictures: -> (range_m, face, cosine) numpy (E,H,W); misses are -1 / -1 / 0. No near-plane skip."""
+        pos, rpy = self._as_warp(pos_ned, 'pos_ned'), self._as_warp(rpy_ned, 'rpy_ned')
+        shape = (self.num_envs, self.height, self.width)
+        rng = wp.zeros(shape, dtype=wp.float32, device=self.device)
+        face = wp.zeros(shape, dtype=wp.int32, device=self.device)
+        cos = wp.zeros(shape, dtype=wp.float32, device=self.device)
+        wp.launch(mesh_shaded_kernel, dim=shape, inputs=[self._mesh.id, pos, rpy, self.width, self.height, self.fx,
+                                                         self.fy, self.far_clip], outputs=[rng, face, cos],
+                  device=self.device)
+        return rng.numpy(), face.numpy(), cos.numpy()
 
     def cast_rays(self, origins: torch.Tensor, dirs: torch.Tensor, far: float) -> torch.Tensor:
         """(N,3) NED origins + (N,3) unit directions -> (N,) hit distance (``far`` on a miss). No near skip."""

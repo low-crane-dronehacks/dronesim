@@ -1,0 +1,21 @@
+# Appended to the x500_depth airframe at container start: indoor, no GPS, external-vision estimate.
+param set-default EKF2_GPS_CTRL 0
+param set-default EKF2_BARO_CTRL 0
+param set-default EKF2_MAG_TYPE 5
+param set-default EKF2_HGT_REF 3
+param set-default EKF2_EV_CTRL 11
+param set-default EKF2_EV_DELAY 0
+param set-default EKF2_REQ_NSATS 0
+param set-default SYS_HAS_MAG 0
+param set-default COM_ARM_WO_GPS 1
+param set-default COM_RC_IN_MODE 4
+param set-default NAV_RCL_ACT 0
+param set-default NAV_DLL_ACT 0
+param set-default COM_OF_LOSS_T 5
+# battery: the drone's 4S 5000 mAh LiPo (failsafe thresholds / reported percentage); MC_BAT_SCALE_EN 1 = PX4 scales
+# throttle by measured voltage. NOTE: PX4 SITL's own simulated battery voltage does not follow our pack model.
+param set-default BAT1_N_CELLS 4
+param set-default BAT1_CAPACITY 5000
+param set-default BAT1_V_CHARGED 4.2
+param set-default BAT1_V_EMPTY 3.5
+param set-default MC_BAT_SCALE_EN 1

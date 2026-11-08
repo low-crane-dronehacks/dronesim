@@ -63,7 +63,7 @@ def _map_base(course: CourseMesh, device: str, px: int, half: float):
 
 
 def write_fpv(path: str, course: CourseMesh, t, pos, rpy, speed, device: str, width=640, height=400,
-              hfov=72.0, vfov=50.0, far=6.0, circles=(), labels=None) -> None:
+              hfov=72.0, vfov=50.0, far=6.0, circles=(), labels=None, obs=None, obs_idx=None) -> None:
     """FPV depth + top-down map video of a (T,) trajectory sampled at FPS (``pos``/``rpy`` (T,3) NED)."""
     import matplotlib
     from PIL import Image, ImageDraw
@@ -73,13 +73,14 @@ def write_fpv(path: str, course: CourseMesh, t, pos, rpy, speed, device: str, wi
                       _focal(width, hfov), _focal(height, vfov), far, depth_type='z', device=device)
     clr = MeshScene(course.select(('wall', 'tunnel', 'boulder')), 1, device=device).distance_at(pos)
     half, MAP = 3.15, height
+    OW = width if obs is not None else 0                                     # panel: the depth the POLICY gets
     base = _map_base(course, device, MAP, half)
     sc = MAP / (2 * half)
     to_px = lambda n, e: ((e + half) * sc, (half - n) * sc)      # noqa: E731
     flown = [to_px(p[0], p[1]) for p in pos[::3]]
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     proc = subprocess.Popen([_ffmpeg(), '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-                             '-s', f'{width + MAP}x{height}', '-r', str(FPS), '-i', '-', '-c:v', 'libx264',
+                             '-s', f'{width + OW + MAP}x{height}', '-r', str(FPS), '-i', '-', '-c:v', 'libx264',
                              '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', path],
                             stdin=subprocess.PIPE)
     T = len(t)
@@ -110,9 +111,19 @@ def write_fpv(path: str, course: CourseMesh, t, pos, rpy, speed, device: str, wi
                 dm.line([(cx, cy), (cx + 0.55 * sc * math.sin(ang), cy - 0.55 * sc * math.cos(ang))],
                         fill=(120, 220, 255), width=1)
             dm.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=(255, 70, 70))
-            frame = Image.new('RGB', (width + MAP, height))
+            frame = Image.new('RGB', (width + OW + MAP, height))
             frame.paste(left, (0, 0))
-            frame.paste(right, (width, 0))
+            if obs is not None:
+                o = obs[obs_idx[i]]
+                orgb = (cmap(np.clip(o, 0, 1))[..., :3] * 255).astype(np.uint8)
+                orgb[o >= 1.0] = (12, 12, 16)
+                orgb[o <= 0.0] = (90, 0, 0)                                  # invalid / near
+                op = Image.fromarray(orgb).resize((width, height), Image.NEAREST)
+                do = ImageDraw.Draw(op)
+                do.rectangle([0, 0, width, 22], fill=(0, 0, 0))
+                do.text((8, 5), 'policy input: stereo depth 128x80, 10 Hz (dark red = invalid)', fill=(235, 235, 235))
+                frame.paste(op, (width, 0))
+            frame.paste(right, (width + OW, 0))
             proc.stdin.write(np.asarray(frame).tobytes())
     proc.stdin.close()
     if proc.wait() != 0:
@@ -129,9 +140,25 @@ def main(argv=None) -> None:
     ap.add_argument('--pick', choices=('any', 'success', 'failure'), default='any')
     ap.add_argument('--skip', type=int, default=0, help='skip this many qualifying episodes first')
     ap.add_argument('--max-tries', type=int, default=64)
+    ap.add_argument('--realism', default='', help="e.g. 'real': fly with the realism effects on (all episodes)")
+    ap.add_argument('--course-mods', default=None, help="as-built changes, e.g. 'drop:wall5;rot:wall3:30:30:south'")
+    ap.add_argument('--cp0-wall', default=None, help="as-built corridor-end line: NW corner -> this wall's tip")
+    ap.add_argument('--speed-cap', type=float, default=0.0, help='clamp commanded |v| (m/s), as the drone interface does')
     a = ap.parse_args(argv)
 
-    env, policy = load_policy(a.checkpoint, 1, a.device, a.seed, perturb=0.0)
+    kw = {}
+    if a.realism:
+        from dronehacks.realism import parse
+        kw['realism'] = parse(a.realism, seed=a.seed, ramp_steps=0)
+    if a.course_mods is not None:
+        kw['course_mods'] = a.course_mods
+    if a.cp0_wall is not None:
+        kw['cp0_wall'] = a.cp0_wall
+    if a.speed_cap:
+        kw['cmd_speed_cap'] = a.speed_cap
+    env, policy = load_policy(a.checkpoint, 1, a.device, a.seed, perturb=0.0, **kw)
+    if getattr(env, 'real', None) is not None:
+        env.real.mask[:] = True
     cells = np.nonzero(env._bank_kind.cpu().numpy() == STARTS[a.start])[0]
     if not len(cells):
         raise SystemExit(f'the bank has no {a.start} starts (return starts need a return-phase checkpoint)')
@@ -139,7 +166,7 @@ def main(argv=None) -> None:
     skip = a.skip
     for attempt in range(a.max_tries):
         cell = int(cells[0] if a.start == 'launch' else rng.choice(cells))
-        tr, phases, outcome, points = _fly(env, policy, cell)
+        tr, phases, outcome, points, obsd = _fly(env, policy, cell)
         ok = outcome == 'success'
         if a.pick == 'any' or ok == (a.pick == 'success'):
             if skip == 0:
@@ -154,16 +181,18 @@ def main(argv=None) -> None:
     speed = np.linalg.norm(np.gradient(pos, 1.0 / FPS, axis=0), axis=1)
     print(f'{a.checkpoint}: {a.start} start (cell {cell}, try {attempt + 1}): {outcome} after {ts[-1]:.1f} s, '
           f'{points:.1f} points')
-    course = CourseMesh.load(os.path.join(env.cfg.assets_dir, 'course.npz'))
+    course = env.layouts[0].mesh if getattr(env, 'layouts', None) else \
+        CourseMesh.load(os.path.join(env.cfg.assets_dir, 'course.npz'))    # the flown layout (as-built mods)
     mark, pad = env._mark[0].cpu().numpy(), env._pad_c[0].cpu().numpy()
     circles = [(pad[0], pad[1], rules.PAD_RADIUS_M, (80, 220, 120)),
                (mark[0], mark[1], rules.RETURN_RADIUS_M, (255, 210, 60))]
     step_of = np.minimum((t / 0.1).astype(int), len(phases) - 1)
     labels = [f'{PHASES[phases[k]]}' + (f'  -> {outcome}' if k == len(phases) - 1 else '') for k in step_of]
-    write_fpv(a.out, course, t, pos, rpy, speed, a.device, circles=circles, labels=labels)
+    write_fpv(a.out, course, t, pos, rpy, speed, a.device, circles=circles, labels=labels,
+              obs=obsd if a.realism else None, obs_idx=np.minimum((t / 0.1).astype(int), len(obsd) - 1))
     path_len = float(np.linalg.norm(np.diff(pos, axis=0), axis=1).sum())
     with open(os.path.splitext(a.out)[0] + '.json', 'w') as f:
-        json.dump({'checkpoint': a.checkpoint, 'start': a.start, 'cell': cell, 'outcome': outcome, 'points': points, 'duration_s': float(ts[-1]),
+        json.dump({'checkpoint': a.checkpoint, 'realism': a.realism, 'start': a.start, 'cell': cell, 'outcome': outcome, 'points': points, 'duration_s': float(ts[-1]),
                    'path_length_m': path_len, 'mean_speed_ms': path_len / max(float(t[-1]), 1e-6),
                    'max_speed_ms': float(speed.max())}, f, indent=1)
 
@@ -178,6 +207,7 @@ def _fly(env, policy, cell: int):
     first = torch.cat([env.plant.pos_ned, env.plant.rpy_ned()], dim=-1).clone()
     obs = env.get_observations()
     outcome, points, phases = 'timeout', 0.0, []
+    obsd = [obs['policy'][0, 0].float().cpu().numpy()]
     for _ in range(env.max_episode_length):
         ph = int(env._phase[0]) if env._rp else 0
         with torch.inference_mode():
@@ -187,6 +217,7 @@ def _fly(env, policy, cell: int):
             pk = torch.cat([env._park_pos[0], torch.zeros(2, device=env.device), env._park_yaw[0:1]]).view(1, 6)
             env.plant.trace[-env.plant.decimation:] = [pk.clone() for _ in range(env.plant.decimation)]
         phases.append(ph)
+        obsd.append(obs['policy'][0, 0].float().cpu().numpy())
         with torch.inference_mode():
             policy.reset(dones)
         if int(dones[0]):
@@ -195,7 +226,7 @@ def _fly(env, policy, cell: int):
             break
     tr = torch.cat([first] + env.plant.trace, dim=0).cpu().numpy()
     env.plant.trace = None
-    return tr, phases, outcome, points
+    return tr, phases, outcome, points, obsd
 
 
 if __name__ == '__main__':
